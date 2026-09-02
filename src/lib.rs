@@ -199,20 +199,14 @@ impl Figure {
 
 struct FigureApp {
     figure: Figure,
-    reset_views: Vec<bool>,
     plot_rects: Vec<egui::Rect>,
 }
 
 impl FigureApp {
     fn new(figure: Figure) -> Self {
-        let reset_views = vec![false; figure.axes.len()];
         let plot_rects = vec![egui::Rect::NOTHING; figure.axes.len()];
 
-        Self {
-            figure,
-            reset_views,
-            plot_rects,
-        }
+        Self { figure, plot_rects }
     }
 
     fn draw(&mut self, ctx: &egui::Context) {
@@ -254,19 +248,13 @@ impl FigureApp {
                 );
                 cell_ui.set_clip_rect(cell_rect);
 
-                self.plot_rects[index] =
-                    draw_axes(&mut cell_ui, plotter, index, &mut self.reset_views[index]);
+                self.plot_rects[index] = draw_axes(&mut cell_ui, plotter, index);
             }
         });
     }
 }
 
-fn draw_axes(
-    ui: &mut egui::Ui,
-    plotter: &Plotter,
-    axes_index: usize,
-    reset_view: &mut bool,
-) -> egui::Rect {
+fn draw_axes(ui: &mut egui::Ui, plotter: &Plotter, axes_index: usize) -> egui::Rect {
     let axes_rect = ui.max_rect();
 
     if !plotter.title.is_empty() {
@@ -277,14 +265,8 @@ fn draw_axes(
         ui.add_space(4.0);
     }
 
-    if ui.button("Reset view").clicked() {
-        *reset_view = true;
-    }
-
-    ui.add_space(4.0);
-
     let plot_height = (axes_rect.bottom() - ui.next_widget_position().y).max(1.0);
-    let mut plot = Plot::new(("subplot", axes_index))
+    let plot = Plot::new(("subplot", axes_index))
         .legend(Legend::default())
         .x_axis_label(&plotter.x_label)
         .y_axis_label(&plotter.y_label)
@@ -295,11 +277,6 @@ fn draw_axes(
         .allow_double_click_reset(true)
         .width(axes_rect.width())
         .height(plot_height);
-
-    if *reset_view {
-        plot = plot.reset();
-        *reset_view = false;
-    }
 
     let response = plot.show(ui, |plot_ui| {
         for (index, line) in plotter.series.iter().enumerate() {
