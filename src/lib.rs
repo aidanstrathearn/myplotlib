@@ -219,9 +219,6 @@ impl FigureApp {
                 ui.add_space(8.0);
             }
 
-            ui.label("Drag to pan • Scroll to zoom • Double-click to reset");
-            ui.add_space(4.0);
-
             let spacing = 8.0;
             let available_size = ui.available_size();
             let total_horizontal_spacing = spacing * self.figure.columns.saturating_sub(1) as f32;
@@ -287,7 +284,8 @@ fn draw_axes(ui: &mut egui::Ui, plotter: &Plotter, axes_index: usize) -> egui::R
 
             let plot_line = Line::new(line_name, PlotPoints::from(points))
                 .name(legend_name)
-                .color(colour);
+                .color(colour)
+                .width(1.9);
 
             plot_ui.line(plot_line);
         }
