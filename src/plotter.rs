@@ -2,6 +2,9 @@ use crate::Points;
 use eframe::egui;
 use egui_plot::{HLine, Legend, Line, LineStyle, Plot, PlotPoints, VLine};
 
+const DEFAULT_LINE_WIDTH: f32 = 3.0;
+const DEFAULT_LABEL_FONT_SIZE: f32 = 24.0;
+
 const MATPLOTLIB_COLORS: [egui::Color32; 10] = [
     egui::Color32::from_rgb(31, 119, 180),
     egui::Color32::from_rgb(255, 127, 14),
@@ -139,8 +142,8 @@ impl Plotter {
         let plot_height = (axes_rect.bottom() - ui.next_widget_position().y).max(1.0);
         let plot = Plot::new(id)
             .legend(Legend::default())
-            .x_axis_label(&self.x_label)
-            .y_axis_label(&self.y_label)
+            .x_axis_label(egui::RichText::new(&self.x_label).size(DEFAULT_LABEL_FONT_SIZE))
+            .y_axis_label(egui::RichText::new(&self.y_label).size(DEFAULT_LABEL_FONT_SIZE))
             .allow_drag(true)
             .allow_scroll(true)
             .allow_zoom(true)
@@ -148,6 +151,13 @@ impl Plotter {
             .allow_double_click_reset(true)
             .width(axes_rect.width())
             .height(plot_height);
+
+        // Apply plot text styling without changing the surrounding UI or plot ID scope.
+        let original_style = ui.style().clone();
+        ui.style_mut().text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::proportional(DEFAULT_LABEL_FONT_SIZE),
+        );
 
         let response = plot.show(ui, |plot_ui| {
             if let Some((lower, upper)) = self.x_limits {
@@ -169,7 +179,7 @@ impl Plotter {
                 let plot_line = Line::new(line_name, PlotPoints::from(points))
                     .name(legend_name)
                     .color(colour)
-                    .width(1.9);
+                    .width(DEFAULT_LINE_WIDTH);
 
                 plot_ui.line(plot_line);
             }
@@ -183,6 +193,7 @@ impl Plotter {
                 let plot_line = HLine::new(format!("hline_{index}"), line.value)
                     .name(legend_name)
                     .color(colour)
+                    .width(DEFAULT_LINE_WIDTH)
                     .style(LineStyle::dashed_dense());
 
                 plot_ui.hline(plot_line);
@@ -197,11 +208,13 @@ impl Plotter {
                 let plot_line = VLine::new(format!("vline_{index}"), line.value)
                     .name(legend_name)
                     .color(colour)
+                    .width(DEFAULT_LINE_WIDTH)
                     .style(LineStyle::dashed_dense());
 
                 plot_ui.vline(plot_line);
             }
         });
+        ui.set_style(original_style);
 
         response.response.rect
     }
