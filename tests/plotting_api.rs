@@ -1,4 +1,4 @@
-use myplotlib::{Figure, Plotter, Result};
+use myplotlib::{Figure, Plotter};
 
 #[test]
 fn supports_the_public_plotting_api() {
@@ -17,8 +17,11 @@ fn supports_the_public_plotting_api() {
     plot.title("Plotting API test");
 
     // Type-check the consuming call without opening a blocking native window.
-    let show: fn(Plotter) -> Result = Plotter::show;
-    let _ = (plot, show);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let show: fn(Plotter) -> myplotlib::Result = Plotter::show;
+        let _ = (plot, show);
+    }
 }
 
 #[test]
@@ -39,6 +42,9 @@ fn supports_the_public_subplot_api() {
     decreasing_axes.title("Decreasing series");
 
     // Type-check the consuming call without opening a blocking native window.
-    let show: fn(Figure) -> Result = Figure::show;
-    let _ = (figure, show);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let show: fn(Figure) -> myplotlib::Result = Figure::show;
+        let _ = (figure, show);
+    }
 }

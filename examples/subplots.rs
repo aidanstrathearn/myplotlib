@@ -1,8 +1,13 @@
-use std::f64::consts::TAU;
+//! Native subplot example. The WASM entry point is a compilation-only stub.
 
-use myplotlib::{Figure, Result};
+#[cfg(target_arch = "wasm32")]
+fn main() {}
 
-fn main() -> Result {
+#[cfg(not(target_arch = "wasm32"))]
+fn main() -> myplotlib::Result {
+    use myplotlib::Figure;
+    use std::f64::consts::TAU;
+
     let samples = 400;
     let x: Vec<f64> = (0..samples)
         .map(|index| 2.0 * TAU * index as f64 / (samples - 1) as f64)

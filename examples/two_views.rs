@@ -2,10 +2,14 @@
 //!
 //! Switch views with the buttons or keys 1/2; reset all parameters with R.
 //! Each view keeps its own slider values when switching between them.
+//! This is a native example; the WASM entry point is a compilation-only stub.
 
+#[cfg(not(target_arch = "wasm32"))]
 use myplotlib::{AppDefinition, AppResult, Plotter, Slider, SliderGrid, SliderGroup, ViewOption};
+#[cfg(not(target_arch = "wasm32"))]
 use std::f64::consts::{PI, TAU};
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Params {
     amplitude: f64,
     frequency: f64,
@@ -15,6 +19,7 @@ struct Params {
     offset: f64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for Params {
     fn default() -> Self {
         Self {
@@ -28,6 +33,7 @@ impl Default for Params {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn wave_controls(params: &mut Params) -> SliderGrid<'_> {
     SliderGrid::new(
         3,
@@ -42,6 +48,7 @@ fn wave_controls(params: &mut Params) -> SliderGrid<'_> {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn wave_plot(params: &mut Params) -> AppResult {
     let x: Vec<f64> = (0..=400).map(|i| TAU * f64::from(i) / 400.0).collect();
     let sine: Vec<f64> = x
@@ -63,6 +70,7 @@ fn wave_plot(params: &mut Params) -> AppResult {
     Ok(plot)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parabola_controls(params: &mut Params) -> SliderGrid<'_> {
     SliderGrid::new(
         2,
@@ -82,6 +90,7 @@ fn parabola_controls(params: &mut Params) -> SliderGrid<'_> {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parabola_plot(params: &mut Params) -> AppResult {
     let points = (0..=200)
         .map(|i| {
@@ -101,6 +110,10 @@ fn parabola_plot(params: &mut Params) -> AppResult {
     Ok(plot)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> myplotlib::NativeResult {
     const VIEWS: &[ViewOption<Params>] = &[
         ViewOption::new("Wave", wave_plot, wave_controls),
