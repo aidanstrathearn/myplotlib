@@ -1,0 +1,21 @@
+[package]
+name = "myplotlib"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+egui_plot = "0.34.1"
+web-time = "1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "HtmlCanvasElement", "Window"] }
+
+[workspace]
+resolver = "3"
