@@ -175,7 +175,12 @@ where
         button_clicked || shortcut_pressed
     }
 
-    fn reset(&mut self) {
+    fn reset(&mut self, ui: &Ui) {
+        // Plot navigation lives in egui's memory, independently of the cached data.
+        for view in 0..self.definition.views.len() {
+            let id = ui.make_persistent_id(egui::Id::new(("plot-app", view)));
+            ui.data_mut(|data| data.remove::<egui_plot::PlotMemory>(id));
+        }
         self.selected_view = 0;
         self.params = P::default();
         self.cached_plotter = None;
@@ -219,7 +224,7 @@ where
                 let (view_changed, reset_requested) = self.draw_header(ui);
                 changed |= view_changed;
                 if reset_requested {
-                    self.reset();
+                    self.reset(ui);
                     changed = true;
                 }
 

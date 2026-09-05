@@ -200,3 +200,91 @@ fn slider_app_renders_caches_switches_views_and_resets() {
     assert!(contains_text(&output, "Amplitude: 0"));
     assert_eq!(COMPUTATIONS.get(), 4);
 }
+
+#[test]
+fn app_reset_restores_navigation_for_every_view() {
+    use eframe::App as _;
+
+    fn automatic_bounds(_: &mut Params) -> AppResult {
+        let mut plot = Plotter::new();
+        plot.add_points(vec![[0.0, 0.0], [5.0, 1.0], [10.0, 0.0]]);
+        Ok(plot)
+    }
+
+    const VIEWS: &[ViewOption<Params>] = &[
+        ViewOption::new("Explicit limits", success, controls),
+        ViewOption::new("Automatic limits", automatic_bounds, controls),
+    ];
+    let ctx = egui::Context::default();
+    // Capture the plot IDs in the same panel/scroll-area scope used by the app.
+    let mut ids = [egui::Id::NULL; 2];
+    let _ = ctx.run(input(0.0, vec![]), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::both().show(ui, |ui| {
+                for (view, id) in ids.iter_mut().enumerate() {
+                    *id = ui.make_persistent_id(egui::Id::new(("plot-app", view)));
+                }
+            });
+        });
+    });
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", "canvas", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut draw = |events| {
+        time += 0.1;
+        ctx.run(input(time, events), |ctx| app.update(ctx, &mut frame))
+    };
+    let memory = |view: usize| PlotMemory::load(&ctx, ids[view]).unwrap();
+    let mut initial_bounds = Vec::new();
+    let mut reset_pos = egui::Pos2::ZERO;
+
+    for view in 0..2 {
+        draw(key([egui::Key::Num1, egui::Key::Num2][view]));
+        let output = draw(vec![]);
+        reset_pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Reset" => {
+                    Some(text.pos + egui::vec2(3.0, 3.0))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let initial = memory(view);
+        initial_bounds.push(*initial.bounds());
+        let center = initial.transform().frame().center();
+        draw(vec![egui::Event::PointerMoved(center)]);
+        draw(vec![egui::Event::Zoom(2.0)]);
+        assert!(memory(view).bounds().width() < initial.bounds().width());
+        assert!(memory(view).bounds().height() < initial.bounds().height());
+        draw(vec![pointer_button(center, true)]);
+        let moved = center + egui::vec2(60.0, 40.0);
+        draw(vec![egui::Event::PointerMoved(moved)]);
+        draw(vec![pointer_button(moved, false)]);
+        assert_ne!(memory(view).bounds().range_y(), initial.bounds().range_y());
+    }
+
+    // Clicking Reset returns to the first view and clears both views' navigation.
+    draw(vec![
+        egui::Event::PointerMoved(reset_pos),
+        pointer_button(reset_pos, true),
+    ]);
+    draw(vec![pointer_button(reset_pos, false)]);
+    draw(vec![]);
+    assert_eq!(memory(0).bounds(), &initial_bounds[0]);
+    draw(key(egui::Key::Num2));
+    draw(vec![]);
+    assert_eq!(memory(1).bounds(), &initial_bounds[1]);
+
+    // The R shortcut takes the same reset path.
+    draw(key(egui::Key::Num1));
+    let center = memory(0).transform().frame().center();
+    draw(vec![egui::Event::PointerMoved(center)]);
+    draw(vec![egui::Event::Zoom(2.0)]);
+    assert_ne!(memory(0).bounds(), &initial_bounds[0]);
+    draw(key(egui::Key::R));
+    draw(vec![]);
+    assert_eq!(memory(0).bounds(), &initial_bounds[0]);
+}
