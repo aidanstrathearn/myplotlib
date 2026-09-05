@@ -161,21 +161,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_the_plot_features_used_by_lasers() {
+    fn renders_labeled_and_unlabeled_series_with_a_reference_line() {
         let x = [0.0, 1.0, 2.0];
-        let forward = [0.0, 1.0, 4.0];
-        let backward = [4.0, 1.0, 0.0];
+        let increasing = [0.0, 1.0, 4.0];
+        let decreasing = [4.0, 1.0, 0.0];
 
         let mut plotter = Plotter::new();
-        plotter.plot(&x, &forward).label("Forward");
-        plotter.plot(&x, &backward).label("Backward");
-        plotter.plot(&x, &forward);
+        plotter.plot(&x, &increasing).label("Increasing");
+        plotter.plot(&x, &decreasing).label("Decreasing");
+        plotter.plot(&x, &increasing);
         plotter
             .axvline(1.0)
-            .label(format!("Threshold ({:.3e} W)", 1.0));
-        plotter.xlabel("Position (m)");
-        plotter.ylabel("Power (W)");
-        plotter.title("Lasers compatibility test");
+            .label(format!("Reference (x = {:.3e})", 1.0));
+        plotter.xlabel("x");
+        plotter.ylabel("y");
+        plotter.title("Plot rendering test");
 
         let mut app = FigureApp::new(Figure::from_plotter(plotter));
         let context = egui::Context::default();
