@@ -128,6 +128,10 @@ where
         creation_context
             .egui_ctx
             .set_visuals(egui::Visuals::light());
+        Self::from_definition(definition)
+    }
+
+    pub(crate) fn from_definition(definition: AppDefinition<P>) -> Self {
         Self {
             definition,
             selected_view: 0,
@@ -212,35 +216,40 @@ where
     }
 }
 
+impl<P> App<P>
+where
+    P: Default + 'static,
+{
+    pub(crate) fn show_ui(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::both().show(ui, |ui| {
+            let (view_changed, reset_requested) = self.draw_header(ui);
+            let mut changed = view_changed;
+            if reset_requested {
+                self.reset(ui);
+                changed = true;
+            }
+
+            ui.separator();
+
+            changed |= self.draw_controls(ui);
+            if changed || self.cached_plotter.is_none() {
+                self.recompute_plot();
+                ui.ctx().request_repaint();
+            }
+
+            ui.separator();
+
+            self.draw_plot(ui);
+        });
+    }
+}
+
 impl<P> eframe::App for App<P>
 where
     P: Default + 'static,
 {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut changed = false;
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::both().show(ui, |ui| {
-                let (view_changed, reset_requested) = self.draw_header(ui);
-                changed |= view_changed;
-                if reset_requested {
-                    self.reset(ui);
-                    changed = true;
-                }
-
-                ui.separator();
-
-                changed |= self.draw_controls(ui);
-                if changed || self.cached_plotter.is_none() {
-                    self.recompute_plot();
-                    ctx.request_repaint();
-                }
-
-                ui.separator();
-
-                self.draw_plot(ui);
-            });
-        });
+        egui::CentralPanel::default().show(ctx, |ui| self.show_ui(ui));
     }
 }
 

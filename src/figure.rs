@@ -94,58 +94,59 @@ impl Figure {
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
-struct FigureApp {
+pub(crate) struct FigureApp {
     figure: Figure,
     plot_rects: Vec<egui::Rect>,
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
 impl FigureApp {
-    fn new(figure: Figure) -> Self {
+    pub(crate) fn new(figure: Figure) -> Self {
         let plot_rects = vec![egui::Rect::NOTHING; figure.axes.len()];
 
         Self { figure, plot_rects }
     }
 
     fn draw(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if !self.figure.title.is_empty() {
-                ui.vertical_centered(|ui| {
-                    ui.heading(&self.figure.title);
-                });
+        egui::CentralPanel::default().show(ctx, |ui| self.show_ui(ui));
+    }
 
-                ui.add_space(8.0);
-            }
+    pub(crate) fn show_ui(&mut self, ui: &mut egui::Ui) {
+        if !self.figure.title.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.heading(&self.figure.title);
+            });
 
-            let spacing = 8.0;
-            let available_size = ui.available_size();
-            let total_horizontal_spacing = spacing * self.figure.columns.saturating_sub(1) as f32;
-            let total_vertical_spacing = spacing * self.figure.rows.saturating_sub(1) as f32;
-            let cell_width =
-                (available_size.x - total_horizontal_spacing) / self.figure.columns as f32;
-            let cell_height = (available_size.y - total_vertical_spacing) / self.figure.rows as f32;
-            let (figure_rect, _) = ui.allocate_exact_size(available_size, egui::Sense::hover());
+            ui.add_space(8.0);
+        }
 
-            for (index, plotter) in self.figure.axes.iter().enumerate() {
-                let row = index / self.figure.columns;
-                let column = index % self.figure.columns;
-                let cell_min = egui::pos2(
-                    figure_rect.min.x + column as f32 * (cell_width + spacing),
-                    figure_rect.min.y + row as f32 * (cell_height + spacing),
-                );
-                let cell_rect =
-                    egui::Rect::from_min_size(cell_min, egui::vec2(cell_width, cell_height));
-                let mut cell_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .id_salt(("subplot_cell", index))
-                        .max_rect(cell_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                cell_ui.set_clip_rect(cell_rect);
+        let spacing = 8.0;
+        let available_size = ui.available_size();
+        let total_horizontal_spacing = spacing * self.figure.columns.saturating_sub(1) as f32;
+        let total_vertical_spacing = spacing * self.figure.rows.saturating_sub(1) as f32;
+        let cell_width = (available_size.x - total_horizontal_spacing) / self.figure.columns as f32;
+        let cell_height = (available_size.y - total_vertical_spacing) / self.figure.rows as f32;
+        let (figure_rect, _) = ui.allocate_exact_size(available_size, egui::Sense::hover());
 
-                self.plot_rects[index] = plotter.show_ui(&mut cell_ui, ("subplot", index));
-            }
-        });
+        for (index, plotter) in self.figure.axes.iter().enumerate() {
+            let row = index / self.figure.columns;
+            let column = index % self.figure.columns;
+            let cell_min = egui::pos2(
+                figure_rect.min.x + column as f32 * (cell_width + spacing),
+                figure_rect.min.y + row as f32 * (cell_height + spacing),
+            );
+            let cell_rect =
+                egui::Rect::from_min_size(cell_min, egui::vec2(cell_width, cell_height));
+            let mut cell_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("subplot_cell", index))
+                    .max_rect(cell_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            cell_ui.set_clip_rect(cell_rect);
+
+            self.plot_rects[index] = plotter.show_ui(&mut cell_ui, ("subplot", index));
+        }
     }
 }
 
