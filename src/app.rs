@@ -145,6 +145,19 @@ where
         &self.definition.views[self.selected_view]
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn navigate_view(&mut self, step: isize) {
+        let selected = self
+            .selected_view
+            .saturating_add_signed(step)
+            .min(self.definition.views.len() - 1);
+        if selected != self.selected_view {
+            self.selected_view = selected;
+            self.cached_plotter = None;
+            self.compute_time = None;
+        }
+    }
+
     fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool) {
         let mut changed = false;
         let mut reset_requested = false;
