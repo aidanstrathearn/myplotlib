@@ -1,9 +1,13 @@
 use crate::Points;
 use eframe::egui;
-use egui_plot::{HLine, Legend, Line, LineStyle, Plot, PlotPoints, VLine};
+use egui_plot::{
+    GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, VLine,
+};
 
 const DEFAULT_LINE_WIDTH: f32 = 3.0;
 const DEFAULT_LABEL_FONT_SIZE: f32 = 24.0;
+const MIN_LOG10_EXPONENT: f64 = -323.0;
+const MAX_LOG10_EXPONENT: f64 = 308.0;
 
 const MATPLOTLIB_COLORS: [egui::Color32; 10] = [
     egui::Color32::from_rgb(31, 119, 180),
@@ -17,6 +21,174 @@ const MATPLOTLIB_COLORS: [egui::Color32; 10] = [
     egui::Color32::from_rgb(188, 189, 34),
     egui::Color32::from_rgb(23, 190, 207),
 ];
+
+/// Coordinate scaling applied independently to each plot axis.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AxisScale {
+    /// Values are plotted without transformation.
+    #[default]
+    Linear,
+    /// Positive values are plotted by their base-10 logarithm.
+    Log10,
+}
+
+impl AxisScale {
+    fn forward(self, value: f64) -> Option<f64> {
+        match self {
+            Self::Linear => Some(value),
+            Self::Log10 if value.is_finite() && value > 0.0 => Some(value.log10()),
+            Self::Log10 => None,
+        }
+    }
+
+    fn inverse(self, value: f64) -> f64 {
+        match self {
+            Self::Linear => value,
+            Self::Log10 => 10.0_f64.powf(value),
+        }
+    }
+
+    fn transform_required(self, value: f64, description: &str) -> f64 {
+        self.forward(value).unwrap_or_else(|| {
+            panic!("{description} must be finite and greater than zero on a log10 axis")
+        })
+    }
+
+    fn is_logarithmic(self) -> bool {
+        self == Self::Log10
+    }
+}
+
+fn transform_line(points: &Points, x_scale: AxisScale, y_scale: AxisScale) -> Vec<Points> {
+    if !x_scale.is_logarithmic() && !y_scale.is_logarithmic() {
+        return vec![points.clone()];
+    }
+
+    let mut segments = Vec::new();
+    let mut current_segment = Vec::new();
+
+    for &[x, y] in points {
+        let transformed = x_scale
+            .forward(x)
+            .zip(y_scale.forward(y))
+            .map(|(x, y)| [x, y])
+            .filter(|[x, y]| x.is_finite() && y.is_finite());
+
+        if let Some(point) = transformed {
+            current_segment.push(point);
+        } else if !current_segment.is_empty() {
+            segments.push(std::mem::take(&mut current_segment));
+        }
+    }
+
+    if !current_segment.is_empty() {
+        segments.push(current_segment);
+    }
+
+    segments
+}
+
+fn log10_grid_marks(input: GridInput) -> Vec<GridMark> {
+    let (lower, upper) = input.bounds;
+    if !lower.is_finite() || !upper.is_finite() || lower >= upper {
+        return Vec::new();
+    }
+
+    // Within one decade, regular subdivisions in exponent space keep the grid useful.
+    if upper - lower < 1.0 {
+        return egui_plot::log_grid_spacer(10)(input);
+    }
+
+    let first_decade = lower.floor().max(MIN_LOG10_EXPONENT) as i32;
+    let last_decade = upper.ceil().min(MAX_LOG10_EXPONENT) as i32;
+    if first_decade > last_decade {
+        return Vec::new();
+    }
+
+    let major_stride = input.base_step_size.ceil().max(1.0) as i32;
+    let first_major = first_decade.div_euclid(major_stride) * major_stride;
+    let mut marks = Vec::new();
+
+    for exponent in (first_major..=last_decade).step_by(major_stride as usize) {
+        let value = exponent as f64;
+        if value >= lower {
+            marks.push(GridMark {
+                value,
+                step_size: major_stride as f64,
+            });
+        }
+    }
+
+    // Only show the conventional 2..9 minor marks when a decade is wide enough.
+    if major_stride == 1 && input.base_step_size <= 0.1 {
+        for exponent in first_decade..last_decade {
+            for multiplier in 2..10 {
+                let value = exponent as f64 + (multiplier as f64).log10();
+                if (lower..=upper).contains(&value) {
+                    marks.push(GridMark {
+                        value,
+                        step_size: 0.1,
+                    });
+                }
+            }
+        }
+    }
+
+    marks.sort_by(|left, right| left.value.total_cmp(&right.value));
+    marks
+}
+
+fn trim_decimal(mut value: String) -> String {
+    if value.contains('.') {
+        while value.ends_with('0') {
+            value.pop();
+        }
+        if value.ends_with('.') {
+            value.pop();
+        }
+    }
+    value
+}
+
+fn format_value(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+
+    let absolute = value.abs();
+    if !(0.001..10_000.0).contains(&absolute) {
+        format!("{value:.3e}")
+    } else {
+        trim_decimal(format!("{value:.6}"))
+    }
+}
+
+fn format_log10_tick(mark: GridMark, range: &std::ops::RangeInclusive<f64>) -> String {
+    let visible_exponents = range.end() - range.start();
+    let nearest_decade = mark.value.round();
+
+    if visible_exponents >= 1.0 && (mark.value - nearest_decade).abs() > 1e-10 {
+        return String::new();
+    }
+
+    format_value(10.0_f64.powf(mark.value))
+}
+
+fn format_hover_label(
+    name: &str,
+    point: &PlotPoint,
+    x_scale: AxisScale,
+    y_scale: AxisScale,
+) -> String {
+    let prefix = if name.is_empty() {
+        String::new()
+    } else {
+        format!("{name}\n")
+    };
+    let x = format_value(x_scale.inverse(point.x));
+    let y = format_value(y_scale.inverse(point.y));
+    format!("{prefix}x = {x}\ny = {y}")
+}
 
 pub struct PlotLine {
     points: Points,
@@ -54,6 +226,8 @@ pub struct Plotter {
     x_limits_pending: std::cell::Cell<bool>,
     y_limits: Option<(f64, f64)>,
     y_limits_pending: std::cell::Cell<bool>,
+    x_scale: AxisScale,
+    y_scale: AxisScale,
 }
 
 impl Plotter {
@@ -99,6 +273,16 @@ impl Plotter {
         self.y_limits_pending.set(true);
     }
 
+    /// Sets the scaling used by the x axis.
+    pub fn xscale(&mut self, scale: AxisScale) {
+        self.x_scale = scale;
+    }
+
+    /// Sets the scaling used by the y axis.
+    pub fn yscale(&mut self, scale: AxisScale) {
+        self.y_scale = scale;
+    }
+
     pub fn axhline(&mut self, y: f64) -> &mut ReferenceLine {
         self.horizontal_lines.push(ReferenceLine {
             value: y,
@@ -137,6 +321,40 @@ impl Plotter {
 
     /// Draws into the available UI area. Use a stable, distinct ID for each plot.
     pub fn show_ui(&self, ui: &mut egui::Ui, id: impl std::hash::Hash) -> egui::Rect {
+        let transformed_series: Vec<_> = self
+            .series
+            .iter()
+            .map(|line| transform_line(&line.points, self.x_scale, self.y_scale))
+            .collect();
+        let transformed_x_limits = self.x_limits.map(|(lower, upper)| {
+            (
+                self.x_scale.transform_required(lower, "x limits"),
+                self.x_scale.transform_required(upper, "x limits"),
+            )
+        });
+        let transformed_y_limits = self.y_limits.map(|(lower, upper)| {
+            (
+                self.y_scale.transform_required(lower, "y limits"),
+                self.y_scale.transform_required(upper, "y limits"),
+            )
+        });
+        let transformed_horizontal_lines: Vec<_> = self
+            .horizontal_lines
+            .iter()
+            .map(|line| {
+                self.y_scale
+                    .transform_required(line.value, "horizontal reference line")
+            })
+            .collect();
+        let transformed_vertical_lines: Vec<_> = self
+            .vertical_lines
+            .iter()
+            .map(|line| {
+                self.x_scale
+                    .transform_required(line.value, "vertical reference line")
+            })
+            .collect();
+
         let axes_rect = ui.available_rect_before_wrap();
 
         if !self.title.is_empty() {
@@ -148,7 +366,18 @@ impl Plotter {
         }
 
         let plot_height = (axes_rect.bottom() - ui.next_widget_position().y).max(1.0);
-        let plot = Plot::new(id)
+        let plot_id = ui.make_persistent_id(egui::Id::new(&id));
+        let scale_memory_id = plot_id.with("myplotlib_axis_scales");
+        let previous_scales = ui.data_mut(|data| {
+            let previous = data.get_temp::<[AxisScale; 2]>(scale_memory_id);
+            data.insert_temp(scale_memory_id, [self.x_scale, self.y_scale]);
+            previous
+        });
+        let changed_scales = previous_scales
+            .map(|previous| [previous[0] != self.x_scale, previous[1] != self.y_scale])
+            .unwrap_or([false, false]);
+
+        let mut plot = Plot::new(id)
             .legend(Legend::default())
             .x_axis_label(egui::RichText::new(&self.x_label).size(DEFAULT_LABEL_FONT_SIZE))
             .y_axis_label(egui::RichText::new(&self.y_label).size(DEFAULT_LABEL_FONT_SIZE))
@@ -160,6 +389,24 @@ impl Plotter {
             .width(axes_rect.width())
             .height(plot_height);
 
+        if self.x_scale.is_logarithmic() {
+            plot = plot
+                .x_grid_spacer(log10_grid_marks)
+                .x_axis_formatter(format_log10_tick);
+        }
+        if self.y_scale.is_logarithmic() {
+            plot = plot
+                .y_grid_spacer(log10_grid_marks)
+                .y_axis_formatter(format_log10_tick);
+        }
+        if self.x_scale.is_logarithmic() || self.y_scale.is_logarithmic() {
+            let x_scale = self.x_scale;
+            let y_scale = self.y_scale;
+            plot = plot.label_formatter(move |name, point| {
+                format_hover_label(name, point, x_scale, y_scale)
+            });
+        }
+
         // Apply plot text styling without changing the surrounding UI or plot ID scope.
         let original_style = ui.style().clone();
         ui.style_mut().text_styles.insert(
@@ -168,47 +415,68 @@ impl Plotter {
         );
 
         let response = plot.show(ui, |plot_ui| {
-            if let Some((lower, upper)) = self.x_limits {
+            if changed_scales[0] || changed_scales[1] {
+                let mut auto_bounds = plot_ui.auto_bounds();
+                auto_bounds.x |= changed_scales[0];
+                auto_bounds.y |= changed_scales[1];
+                plot_ui.set_auto_bounds(auto_bounds);
+            }
+
+            if let Some((lower, upper)) = transformed_x_limits {
                 // Apply new limits once; ordinary frames preserve mouse navigation.
                 if self.x_limits_pending.replace(false)
                     || plot_ui.auto_bounds().x
                     || plot_ui.response().double_clicked()
+                    || changed_scales[0]
                 {
                     plot_ui.set_plot_bounds_x(lower..=upper);
                 }
             }
 
-            if let Some((lower, upper)) = self.y_limits {
+            if let Some((lower, upper)) = transformed_y_limits {
                 // Apply new limits once; ordinary frames preserve mouse navigation.
                 if self.y_limits_pending.replace(false)
                     || plot_ui.auto_bounds().y
                     || plot_ui.response().double_clicked()
+                    || changed_scales[1]
                 {
                     plot_ui.set_plot_bounds_y(lower..=upper);
                 }
             }
 
-            for (index, line) in self.series.iter().enumerate() {
+            for (index, (line, segments)) in self.series.iter().zip(transformed_series).enumerate()
+            {
                 let colour = MATPLOTLIB_COLORS[index % MATPLOTLIB_COLORS.len()];
                 let legend_name = line.label.as_deref().unwrap_or_default();
-                let line_name = format!("series_{index}");
-                let points = line.points.clone();
+                let segment_count = segments.len();
 
-                let plot_line = Line::new(line_name, PlotPoints::from(points))
-                    .name(legend_name)
-                    .color(colour)
-                    .width(DEFAULT_LINE_WIDTH);
+                for (segment_index, points) in segments.into_iter().enumerate() {
+                    let line_name = if segment_count == 1 {
+                        format!("series_{index}")
+                    } else {
+                        format!("series_{index}_segment_{segment_index}")
+                    };
+                    let plot_line = Line::new(line_name, PlotPoints::from(points))
+                        .name(legend_name)
+                        .color(colour)
+                        .width(DEFAULT_LINE_WIDTH);
 
-                plot_ui.line(plot_line);
+                    plot_ui.line(plot_line);
+                }
             }
 
             let colour_offset = self.series.len();
 
-            for (index, line) in self.horizontal_lines.iter().enumerate() {
+            for (index, (line, value)) in self
+                .horizontal_lines
+                .iter()
+                .zip(transformed_horizontal_lines)
+                .enumerate()
+            {
                 let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
                 let legend_name = line.label.as_deref().unwrap_or_default();
 
-                let plot_line = HLine::new(format!("hline_{index}"), line.value)
+                let plot_line = HLine::new(format!("hline_{index}"), value)
                     .name(legend_name)
                     .color(colour)
                     .width(DEFAULT_LINE_WIDTH)
@@ -219,11 +487,16 @@ impl Plotter {
 
             let colour_offset = colour_offset + self.horizontal_lines.len();
 
-            for (index, line) in self.vertical_lines.iter().enumerate() {
+            for (index, (line, value)) in self
+                .vertical_lines
+                .iter()
+                .zip(transformed_vertical_lines)
+                .enumerate()
+            {
                 let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
                 let legend_name = line.label.as_deref().unwrap_or_default();
 
-                let plot_line = VLine::new(format!("vline_{index}"), line.value)
+                let plot_line = VLine::new(format!("vline_{index}"), value)
                     .name(legend_name)
                     .color(colour)
                     .width(DEFAULT_LINE_WIDTH)
@@ -235,5 +508,85 @@ impl Plotter {
         ui.set_style(original_style);
 
         response.response.rect
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transforms_and_restores_log10_values() {
+        assert_eq!(AxisScale::Linear.forward(12.5), Some(12.5));
+        assert_eq!(AxisScale::Log10.forward(0.1), Some(-1.0));
+        assert_eq!(AxisScale::Log10.forward(1.0), Some(0.0));
+        assert_eq!(AxisScale::Log10.forward(1000.0), Some(3.0));
+        assert_eq!(AxisScale::Log10.inverse(3.0), 1000.0);
+        assert_eq!(AxisScale::Log10.forward(0.0), None);
+        assert_eq!(AxisScale::Log10.forward(-1.0), None);
+    }
+
+    #[test]
+    fn nonpositive_log_values_split_lines() {
+        let points = vec![[1.0, 10.0], [10.0, 0.0], [100.0, 1000.0]];
+        let segments = transform_line(&points, AxisScale::Log10, AxisScale::Log10);
+
+        assert_eq!(segments, vec![vec![[0.0, 1.0]], vec![[2.0, 3.0]]]);
+    }
+
+    #[test]
+    fn log_grid_contains_decades_and_minor_marks() {
+        let marks = log10_grid_marks(GridInput {
+            bounds: (-1.0, 2.0),
+            base_step_size: 0.05,
+        });
+
+        assert!(marks.iter().any(|mark| mark.value == -1.0));
+        assert!(marks.iter().any(|mark| mark.value == 0.0));
+        assert!(marks.iter().any(|mark| mark.value == 1.0));
+        assert!(
+            marks
+                .iter()
+                .any(|mark| (mark.value - 2.0_f64.log10()).abs() < 1e-12)
+        );
+    }
+
+    #[test]
+    fn log_ticks_and_hover_labels_use_original_values() {
+        let broad_range = -1.0..=2.0;
+        assert_eq!(
+            format_log10_tick(
+                GridMark {
+                    value: 2.0,
+                    step_size: 1.0,
+                },
+                &broad_range,
+            ),
+            "100"
+        );
+        assert_eq!(
+            format_log10_tick(
+                GridMark {
+                    value: 2.0_f64.log10(),
+                    step_size: 0.1,
+                },
+                &broad_range,
+            ),
+            ""
+        );
+
+        let label = format_hover_label(
+            "Signal",
+            &PlotPoint::new(1.0, -2.0),
+            AxisScale::Log10,
+            AxisScale::Log10,
+        );
+        assert_eq!(label, "Signal\nx = 10\ny = 0.01");
+    }
+
+    #[test]
+    #[should_panic(expected = "x limits must be finite and greater than zero on a log10 axis")]
+    fn rejects_nonpositive_log_limits() {
+        AxisScale::Log10.transform_required(0.0, "x limits");
     }
 }

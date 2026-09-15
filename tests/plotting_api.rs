@@ -1,4 +1,4 @@
-use myplotlib::{Figure, Plotter};
+use myplotlib::{AxisScale, Figure, Plotter};
 
 #[test]
 fn supports_the_public_plotting_api() {
@@ -14,6 +14,8 @@ fn supports_the_public_plotting_api() {
         .label(format!("Reference (x = {:.3e})", 1.0));
     plot.xlim(0.0, 2.0);
     plot.ylim(0.0, 4.0);
+    plot.xscale(AxisScale::Linear);
+    plot.yscale(AxisScale::Linear);
     plot.xlabel("x");
     plot.ylabel("y");
     plot.title("Plotting API test");

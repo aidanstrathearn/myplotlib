@@ -8,6 +8,7 @@
 use myplotlib::{AppDefinition, AppResult, Plotter, Slider, SliderGrid, SliderGroup, ViewOption};
 #[cfg(not(target_arch = "wasm32"))]
 use std::f64::consts::{PI, TAU};
+use myplotlib::AxisScale;
 
 #[cfg(not(target_arch = "wasm32"))]
 struct Params {
@@ -103,9 +104,10 @@ fn parabola_plot(params: &mut Params) -> AppResult {
     let mut plot = Plotter::new();
     plot.add_points(points).label("Parabola");
     plot.axvline(params.center).label("Center");
-    plot.axhline(params.offset).label("Offset");
+    //plot.axhline(params.offset).label("Offset");
     plot.xlabel("x");
     plot.ylabel("y");
+    plot.yscale(AxisScale::Log10);
     plot.xlim(-5.0, 5.0);
     Ok(plot)
 }

@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui_plot::PlotMemory;
 use myplotlib::{
-    App, AppDefinition, AppResult, Plotter, Slider, SliderGrid, SliderGroup, ViewOption,
+    App, AppDefinition, AppResult, AxisScale, Plotter, Slider, SliderGrid, SliderGroup, ViewOption,
 };
 use std::cell::Cell;
 
@@ -98,6 +98,106 @@ fn axis_limits_allow_navigation_and_restore_on_reset_and_recomputation() {
     let recomputed = plot_frame(&ctx, &sample_plot(), input(1.5, vec![]));
     assert_eq!(recomputed.bounds().range_x(), 0.0..=10.0);
     assert_eq!(recomputed.bounds().range_y(), -2.0..=2.0);
+}
+
+fn log_plot() -> Plotter {
+    let mut plot = Plotter::new();
+    plot.add_points(vec![[1.0, 0.01], [10.0, 1.0], [1000.0, 100.0]])
+        .label("Signal");
+    plot.axvline(10.0).label("x reference");
+    plot.axhline(1.0).label("y reference");
+    plot.xscale(AxisScale::Log10);
+    plot.yscale(AxisScale::Log10);
+    plot.xlim(1.0, 1000.0);
+    plot.ylim(0.01, 100.0);
+    plot
+}
+
+#[test]
+fn logarithmic_limits_allow_zoom_and_restore_on_reset() {
+    let ctx = egui::Context::default();
+    let plot = log_plot();
+    let first = plot_frame(&ctx, &plot, input(0.0, vec![]));
+    assert_eq!(first.bounds().range_x(), 0.0..=3.0);
+    assert_eq!(first.bounds().range_y(), -2.0..=2.0);
+
+    let position = first.transform().frame().center();
+    plot_frame(
+        &ctx,
+        &plot,
+        input(0.1, vec![egui::Event::PointerMoved(position)]),
+    );
+    let zoomed = plot_frame(&ctx, &plot, input(0.2, vec![egui::Event::Zoom(2.0)]));
+    assert!(zoomed.bounds().width() < 3.0);
+    assert!(zoomed.bounds().height() < 4.0);
+
+    let idle = plot_frame(&ctx, &plot, input(0.3, vec![]));
+    assert_eq!(idle.bounds(), zoomed.bounds());
+
+    for (time, pressed) in [(1.0, true), (1.05, false), (1.1, true), (1.15, false)] {
+        plot_frame(
+            &ctx,
+            &plot,
+            input(time, vec![pointer_button(position, pressed)]),
+        );
+    }
+    let reset = plot_frame(&ctx, &plot, input(1.2, vec![]));
+    assert_eq!(reset.bounds().range_x(), 0.0..=3.0);
+    assert_eq!(reset.bounds().range_y(), -2.0..=2.0);
+}
+
+#[test]
+fn changing_scale_resets_bounds_but_rebuilding_at_the_same_scale_does_not() {
+    let ctx = egui::Context::default();
+    let mut plot = Plotter::new();
+    plot.add_points(vec![[1.0, 1.0], [10.0, 2.0], [100.0, 3.0]]);
+    plot_frame(&ctx, &plot, input(0.0, vec![]));
+
+    plot.xscale(AxisScale::Log10);
+    let logarithmic = plot_frame(&ctx, &plot, input(0.1, vec![]));
+    assert!(
+        (*logarithmic.bounds().range_x().start() + 0.1).abs() < 1e-8,
+        "unexpected logarithmic bounds: {:?}",
+        logarithmic.bounds().range_x()
+    );
+    assert!(
+        (*logarithmic.bounds().range_x().end() - 2.1).abs() < 1e-8,
+        "unexpected logarithmic bounds: {:?}",
+        logarithmic.bounds().range_x()
+    );
+
+    let position = logarithmic.transform().frame().center();
+    plot_frame(
+        &ctx,
+        &plot,
+        input(0.2, vec![egui::Event::PointerMoved(position)]),
+    );
+    let zoomed = plot_frame(&ctx, &plot, input(0.3, vec![egui::Event::Zoom(2.0)]));
+
+    let mut rebuilt = Plotter::new();
+    rebuilt.add_points(vec![[1.0, 2.0], [10.0, 3.0], [100.0, 4.0]]);
+    rebuilt.xscale(AxisScale::Log10);
+    let recomputed = plot_frame(&ctx, &rebuilt, input(0.4, vec![]));
+    assert_eq!(recomputed.bounds().range_x(), zoomed.bounds().range_x());
+}
+
+#[test]
+fn changing_scale_reapplies_explicit_limits_in_transformed_coordinates() {
+    let ctx = egui::Context::default();
+    let mut plot = Plotter::new();
+    plot.add_points(vec![[1.0, 1.0], [10.0, 10.0], [100.0, 100.0]]);
+    plot.xlim(1.0, 100.0);
+    plot.ylim(1.0, 100.0);
+
+    let linear = plot_frame(&ctx, &plot, input(0.0, vec![]));
+    assert_eq!(linear.bounds().range_x(), 1.0..=100.0);
+    assert_eq!(linear.bounds().range_y(), 1.0..=100.0);
+
+    plot.xscale(AxisScale::Log10);
+    plot.yscale(AxisScale::Log10);
+    let logarithmic = plot_frame(&ctx, &plot, input(0.1, vec![]));
+    assert_eq!(logarithmic.bounds().range_x(), 0.0..=2.0);
+    assert_eq!(logarithmic.bounds().range_y(), 0.0..=2.0);
 }
 
 thread_local! {

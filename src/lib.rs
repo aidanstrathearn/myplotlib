@@ -14,7 +14,7 @@ pub use app::{WebResult, run_web};
 pub use appmenu::AppMenu;
 pub use controls::{Slider, SliderGrid, SliderGroup};
 pub use figure::Figure;
-pub use plotter::{PlotLine, Plotter, ReferenceLine};
+pub use plotter::{AxisScale, PlotLine, Plotter, ReferenceLine};
 
 pub type Points = Vec<[f64; 2]>;
 pub type Result<T = ()> = eframe::Result<T>;
