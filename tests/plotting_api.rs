@@ -12,6 +12,8 @@ fn supports_the_public_plotting_api() {
     plot.plot(&x, &increasing);
     plot.axvline(1.0)
         .label(format!("Reference (x = {:.3e})", 1.0));
+    plot.xlim(0.0, 2.0);
+    plot.ylim(0.0, 4.0);
     plot.xlabel("x");
     plot.ylabel("y");
     plot.title("Plotting API test");

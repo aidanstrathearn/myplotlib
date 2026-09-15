@@ -42,15 +42,17 @@ fn sample_plot() -> Plotter {
     plot.add_points(vec![[0.0, 0.0], [5.0, 1.0], [10.0, 0.0]])
         .label("Signal");
     plot.xlim(0.0, 10.0);
+    plot.ylim(-2.0, 2.0);
     plot
 }
 
 #[test]
-fn x_limits_allow_navigation_and_restore_on_reset_and_recomputation() {
+fn axis_limits_allow_navigation_and_restore_on_reset_and_recomputation() {
     let ctx = egui::Context::default();
     let plot = sample_plot();
     let first = plot_frame(&ctx, &plot, input(0.0, vec![]));
     assert_eq!(first.bounds().range_x(), 0.0..=10.0);
+    assert_eq!(first.bounds().range_y(), -2.0..=2.0);
     let pos = first.transform().frame().center();
     plot_frame(
         &ctx,
@@ -70,6 +72,7 @@ fn x_limits_allow_navigation_and_restore_on_reset_and_recomputation() {
     assert_ne!(panned.bounds().range_x(), 0.0..=10.0);
     let idle = plot_frame(&ctx, &plot, input(0.4, vec![]));
     assert_eq!(idle.bounds().range_x(), panned.bounds().range_x());
+    assert_eq!(idle.bounds().range_y(), panned.bounds().range_y());
 
     // A double-click restores the requested limits, rather than fitting the data.
     for (time, pressed) in [(1.0, true), (1.05, false), (1.1, true), (1.15, false)] {
@@ -81,16 +84,20 @@ fn x_limits_allow_navigation_and_restore_on_reset_and_recomputation() {
     }
     let reset = plot_frame(&ctx, &plot, input(1.2, vec![]));
     assert_eq!(reset.bounds().range_x(), 0.0..=10.0);
+    assert_eq!(reset.bounds().range_y(), -2.0..=2.0);
 
     // Zoom must also survive the next redraw.
     let zoomed = plot_frame(&ctx, &plot, input(1.3, vec![egui::Event::Zoom(2.0)]));
     assert!(zoomed.bounds().width() < 10.0);
+    assert!(zoomed.bounds().height() < 4.0);
     let idle = plot_frame(&ctx, &plot, input(1.4, vec![]));
     assert_eq!(idle.bounds().range_x(), zoomed.bounds().range_x());
+    assert_eq!(idle.bounds().range_y(), zoomed.bounds().range_y());
 
     // A slider callback returns a fresh Plotter, even when its xlim is unchanged.
     let recomputed = plot_frame(&ctx, &sample_plot(), input(1.5, vec![]));
     assert_eq!(recomputed.bounds().range_x(), 0.0..=10.0);
+    assert_eq!(recomputed.bounds().range_y(), -2.0..=2.0);
 }
 
 thread_local! {

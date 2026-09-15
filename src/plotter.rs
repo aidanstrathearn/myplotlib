@@ -52,6 +52,8 @@ pub struct Plotter {
     pub(crate) title: String,
     x_limits: Option<(f64, f64)>,
     x_limits_pending: std::cell::Cell<bool>,
+    y_limits: Option<(f64, f64)>,
+    y_limits_pending: std::cell::Cell<bool>,
 }
 
 impl Plotter {
@@ -89,6 +91,12 @@ impl Plotter {
     pub fn xlim(&mut self, lower: f64, upper: f64) {
         self.x_limits = Some((lower, upper));
         self.x_limits_pending.set(true);
+    }
+
+    /// Sets the initial and reset y bounds, while allowing subsequent pan and zoom.
+    pub fn ylim(&mut self, lower: f64, upper: f64) {
+        self.y_limits = Some((lower, upper));
+        self.y_limits_pending.set(true);
     }
 
     pub fn axhline(&mut self, y: f64) -> &mut ReferenceLine {
@@ -167,6 +175,16 @@ impl Plotter {
                     || plot_ui.response().double_clicked()
                 {
                     plot_ui.set_plot_bounds_x(lower..=upper);
+                }
+            }
+
+            if let Some((lower, upper)) = self.y_limits {
+                // Apply new limits once; ordinary frames preserve mouse navigation.
+                if self.y_limits_pending.replace(false)
+                    || plot_ui.auto_bounds().y
+                    || plot_ui.response().double_clicked()
+                {
+                    plot_ui.set_plot_bounds_y(lower..=upper);
                 }
             }
 
