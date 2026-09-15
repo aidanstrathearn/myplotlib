@@ -101,15 +101,24 @@ fn log10_grid_marks(input: GridInput) -> Vec<GridMark> {
     }
 
     let major_stride = input.base_step_size.ceil().max(1.0) as i32;
+    let medium_stride = major_stride * 5;
+    let coarse_stride = major_stride * 10;
     let first_major = first_decade.div_euclid(major_stride) * major_stride;
     let mut marks = Vec::new();
 
     for exponent in (first_major..=last_decade).step_by(major_stride as usize) {
         let value = exponent as f64;
         if (lower..upper).contains(&value) {
+            let step_size = if exponent.rem_euclid(coarse_stride) == 0 {
+                coarse_stride
+            } else if exponent.rem_euclid(medium_stride) == 0 {
+                medium_stride
+            } else {
+                major_stride
+            };
             marks.push(GridMark {
                 value,
-                step_size: major_stride as f64,
+                step_size: f64::from(step_size),
             });
         }
     }
@@ -572,7 +581,7 @@ mod tests {
     fn log_grid_contains_decades_and_minor_marks() {
         let marks = log10_grid_marks(GridInput {
             bounds: (-1.0, 2.0),
-            base_step_size: 0.05,
+            base_step_size: 0.04,
         });
 
         assert!(marks.iter().any(|mark| mark.value == -1.0));
@@ -598,6 +607,24 @@ mod tests {
                 .iter()
                 .any(|mark| (mark.value - four_hundred).abs() < 1e-12)
         );
+    }
+
+    #[test]
+    fn log_grid_keeps_coarser_decade_marks_for_wide_ranges() {
+        let marks = log10_grid_marks(GridInput {
+            bounds: (-8.0, 8.0),
+            base_step_size: 0.5,
+        });
+        let step_size_at = |exponent| {
+            marks
+                .iter()
+                .find(|mark| mark.value == exponent)
+                .map(|mark| mark.step_size)
+        };
+
+        assert_eq!(step_size_at(3.0), Some(1.0));
+        assert_eq!(step_size_at(5.0), Some(5.0));
+        assert_eq!(step_size_at(0.0), Some(10.0));
     }
 
     #[test]
