@@ -94,11 +94,6 @@ fn log10_grid_marks(input: GridInput) -> Vec<GridMark> {
         return Vec::new();
     }
 
-    // Within one decade, regular subdivisions in exponent space keep the grid useful.
-    if upper - lower < 1.0 {
-        return egui_plot::log_grid_spacer(10)(input);
-    }
-
     let first_decade = lower.floor().max(MIN_LOG10_EXPONENT) as i32;
     let last_decade = upper.ceil().min(MAX_LOG10_EXPONENT) as i32;
     if first_decade > last_decade {
@@ -119,15 +114,16 @@ fn log10_grid_marks(input: GridInput) -> Vec<GridMark> {
         }
     }
 
-    // Only show the conventional 2..9 minor marks when a decade is wide enough.
-    if major_stride == 1 && input.base_step_size <= 0.1 {
+    // Only show the conventional 2..9 minor marks when their narrowest gap is visible.
+    let minor_step_size = (10.0_f64 / 9.0).log10();
+    if major_stride == 1 && input.base_step_size <= minor_step_size {
         for exponent in first_decade..last_decade {
             for multiplier in 2..10 {
                 let value = exponent as f64 + (multiplier as f64).log10();
                 if (lower..upper).contains(&value) {
                     marks.push(GridMark {
                         value,
-                        step_size: 0.1,
+                        step_size: minor_step_size,
                     });
                 }
             }
@@ -163,15 +159,17 @@ fn format_value(value: f64) -> String {
     }
 }
 
-fn format_log10_tick(mark: GridMark, range: &std::ops::RangeInclusive<f64>) -> String {
-    let visible_exponents = range.end() - range.start();
-    let nearest_decade = mark.value.round();
+fn format_log10_tick(mark: GridMark, _range: &std::ops::RangeInclusive<f64>) -> String {
+    let mut exponent = mark.value.floor() as i32;
+    let mut mantissa = 10.0_f64.powf(mark.value - f64::from(exponent)).round() as i32;
 
-    if visible_exponents >= 1.0 && (mark.value - nearest_decade).abs() > 1e-10 {
-        return String::new();
+    // Floating-point error can put a decade tick just below its integer exponent.
+    if mantissa == 10 {
+        mantissa = 1;
+        exponent += 1;
     }
 
-    format_value(10.0_f64.powf(mark.value))
+    format!("{mantissa}e{exponent}")
 }
 
 fn format_hover_label(
@@ -588,6 +586,21 @@ mod tests {
     }
 
     #[test]
+    fn log_grid_uses_conventional_ticks_within_one_decade() {
+        let marks = log10_grid_marks(GridInput {
+            bounds: (2.0, 2.8),
+            base_step_size: 0.01,
+        });
+        let four_hundred = 2.0 + 4.0_f64.log10();
+
+        assert!(
+            marks
+                .iter()
+                .any(|mark| (mark.value - four_hundred).abs() < 1e-12)
+        );
+    }
+
+    #[test]
     fn log_grid_excludes_marks_outside_visible_bounds() {
         let lower = -4.5;
         let upper = 6.5;
@@ -610,12 +623,32 @@ mod tests {
         assert_eq!(
             format_log10_tick(
                 GridMark {
+                    value: -2.0,
+                    step_size: 1.0,
+                },
+                &broad_range,
+            ),
+            "1e-2"
+        );
+        assert_eq!(
+            format_log10_tick(
+                GridMark {
+                    value: 0.0,
+                    step_size: 1.0,
+                },
+                &broad_range,
+            ),
+            "1e0"
+        );
+        assert_eq!(
+            format_log10_tick(
+                GridMark {
                     value: 2.0,
                     step_size: 1.0,
                 },
                 &broad_range,
             ),
-            "100"
+            "1e2"
         );
         assert_eq!(
             format_log10_tick(
@@ -625,7 +658,28 @@ mod tests {
                 },
                 &broad_range,
             ),
-            ""
+            "2e0"
+        );
+
+        assert_eq!(
+            format_log10_tick(
+                GridMark {
+                    value: 2.0 + 4.0_f64.log10(),
+                    step_size: 0.1,
+                },
+                &broad_range,
+            ),
+            "4e2"
+        );
+        assert_eq!(
+            format_log10_tick(
+                GridMark {
+                    value: 3.0 - 1e-12,
+                    step_size: 1.0,
+                },
+                &broad_range,
+            ),
+            "1e3"
         );
 
         let label = format_hover_label(
