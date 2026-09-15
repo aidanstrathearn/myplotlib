@@ -1,7 +1,7 @@
 use crate::Points;
 use eframe::egui;
 use egui_plot::{
-    GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, VLine,
+    GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, PlotUi, VLine,
 };
 
 const DEFAULT_LINE_WIDTH: f32 = 3.0;
@@ -190,6 +190,14 @@ fn format_hover_label(
     format!("{prefix}x = {x}\ny = {y}")
 }
 
+struct RenderData {
+    series_segments: Vec<Vec<Points>>,
+    x_limits: Option<(f64, f64)>,
+    y_limits: Option<(f64, f64)>,
+    horizontal_lines: Vec<f64>,
+    vertical_lines: Vec<f64>,
+}
+
 pub struct PlotLine {
     points: Points,
     label: Option<String>,
@@ -313,6 +321,143 @@ impl Plotter {
         self.title = title.into();
     }
 
+    fn transform_for_rendering(&self) -> RenderData {
+        let series_segments = self
+            .series
+            .iter()
+            .map(|line| transform_line(&line.points, self.x_scale, self.y_scale))
+            .collect();
+        let x_limits = self.x_limits.map(|(lower, upper)| {
+            (
+                self.x_scale.transform_required(lower, "x limits"),
+                self.x_scale.transform_required(upper, "x limits"),
+            )
+        });
+        let y_limits = self.y_limits.map(|(lower, upper)| {
+            (
+                self.y_scale.transform_required(lower, "y limits"),
+                self.y_scale.transform_required(upper, "y limits"),
+            )
+        });
+        let horizontal_lines = self
+            .horizontal_lines
+            .iter()
+            .map(|line| {
+                self.y_scale
+                    .transform_required(line.value, "horizontal reference line")
+            })
+            .collect();
+        let vertical_lines = self
+            .vertical_lines
+            .iter()
+            .map(|line| {
+                self.x_scale
+                    .transform_required(line.value, "vertical reference line")
+            })
+            .collect();
+
+        RenderData {
+            series_segments,
+            x_limits,
+            y_limits,
+            horizontal_lines,
+            vertical_lines,
+        }
+    }
+
+    fn apply_bounds(
+        &self,
+        plot_ui: &mut PlotUi<'_>,
+        x_limits: Option<(f64, f64)>,
+        y_limits: Option<(f64, f64)>,
+        changed_scales: [bool; 2],
+    ) {
+        if changed_scales[0] || changed_scales[1] {
+            let mut auto_bounds = plot_ui.auto_bounds();
+            auto_bounds.x |= changed_scales[0];
+            auto_bounds.y |= changed_scales[1];
+            plot_ui.set_auto_bounds(auto_bounds);
+        }
+
+        if let Some((lower, upper)) = x_limits {
+            // Apply new limits once; ordinary frames preserve mouse navigation.
+            if self.x_limits_pending.replace(false)
+                || plot_ui.auto_bounds().x
+                || plot_ui.response().double_clicked()
+                || changed_scales[0]
+            {
+                plot_ui.set_plot_bounds_x(lower..=upper);
+            }
+        }
+
+        if let Some((lower, upper)) = y_limits {
+            // Apply new limits once; ordinary frames preserve mouse navigation.
+            if self.y_limits_pending.replace(false)
+                || plot_ui.auto_bounds().y
+                || plot_ui.response().double_clicked()
+                || changed_scales[1]
+            {
+                plot_ui.set_plot_bounds_y(lower..=upper);
+            }
+        }
+    }
+
+    fn add_series(&self, plot_ui: &mut PlotUi<'_>, series_segments: Vec<Vec<Points>>) {
+        for (index, (line, segments)) in self.series.iter().zip(series_segments).enumerate() {
+            let colour = MATPLOTLIB_COLORS[index % MATPLOTLIB_COLORS.len()];
+            let legend_name = line.label.as_deref().unwrap_or_default();
+            let segment_count = segments.len();
+
+            for (segment_index, points) in segments.into_iter().enumerate() {
+                let line_name = if segment_count == 1 {
+                    format!("series_{index}")
+                } else {
+                    format!("series_{index}_segment_{segment_index}")
+                };
+                let plot_line = Line::new(line_name, PlotPoints::from(points))
+                    .name(legend_name)
+                    .color(colour)
+                    .width(DEFAULT_LINE_WIDTH);
+
+                plot_ui.line(plot_line);
+            }
+        }
+    }
+
+    fn add_horizontal_lines(&self, plot_ui: &mut PlotUi<'_>, values: Vec<f64>) {
+        let colour_offset = self.series.len();
+
+        for (index, (line, value)) in self.horizontal_lines.iter().zip(values).enumerate() {
+            let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
+            let legend_name = line.label.as_deref().unwrap_or_default();
+
+            let plot_line = HLine::new(format!("hline_{index}"), value)
+                .name(legend_name)
+                .color(colour)
+                .width(DEFAULT_LINE_WIDTH)
+                .style(LineStyle::dashed_dense());
+
+            plot_ui.hline(plot_line);
+        }
+    }
+
+    fn add_vertical_lines(&self, plot_ui: &mut PlotUi<'_>, values: Vec<f64>) {
+        let colour_offset = self.series.len() + self.horizontal_lines.len();
+
+        for (index, (line, value)) in self.vertical_lines.iter().zip(values).enumerate() {
+            let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
+            let legend_name = line.label.as_deref().unwrap_or_default();
+
+            let plot_line = VLine::new(format!("vline_{index}"), value)
+                .name(legend_name)
+                .color(colour)
+                .width(DEFAULT_LINE_WIDTH)
+                .style(LineStyle::dashed_dense());
+
+            plot_ui.vline(plot_line);
+        }
+    }
+
     /// Opens a native window and blocks until it is closed.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn show(self) -> crate::Result {
@@ -321,39 +466,7 @@ impl Plotter {
 
     /// Draws into the available UI area. Use a stable, distinct ID for each plot.
     pub fn show_ui(&self, ui: &mut egui::Ui, id: impl std::hash::Hash) -> egui::Rect {
-        let transformed_series: Vec<_> = self
-            .series
-            .iter()
-            .map(|line| transform_line(&line.points, self.x_scale, self.y_scale))
-            .collect();
-        let transformed_x_limits = self.x_limits.map(|(lower, upper)| {
-            (
-                self.x_scale.transform_required(lower, "x limits"),
-                self.x_scale.transform_required(upper, "x limits"),
-            )
-        });
-        let transformed_y_limits = self.y_limits.map(|(lower, upper)| {
-            (
-                self.y_scale.transform_required(lower, "y limits"),
-                self.y_scale.transform_required(upper, "y limits"),
-            )
-        });
-        let transformed_horizontal_lines: Vec<_> = self
-            .horizontal_lines
-            .iter()
-            .map(|line| {
-                self.y_scale
-                    .transform_required(line.value, "horizontal reference line")
-            })
-            .collect();
-        let transformed_vertical_lines: Vec<_> = self
-            .vertical_lines
-            .iter()
-            .map(|line| {
-                self.x_scale
-                    .transform_required(line.value, "vertical reference line")
-            })
-            .collect();
+        let render_data = self.transform_for_rendering();
 
         let axes_rect = ui.available_rect_before_wrap();
 
@@ -415,95 +528,18 @@ impl Plotter {
         );
 
         let response = plot.show(ui, |plot_ui| {
-            if changed_scales[0] || changed_scales[1] {
-                let mut auto_bounds = plot_ui.auto_bounds();
-                auto_bounds.x |= changed_scales[0];
-                auto_bounds.y |= changed_scales[1];
-                plot_ui.set_auto_bounds(auto_bounds);
-            }
+            let RenderData {
+                series_segments,
+                x_limits,
+                y_limits,
+                horizontal_lines,
+                vertical_lines,
+            } = render_data;
 
-            if let Some((lower, upper)) = transformed_x_limits {
-                // Apply new limits once; ordinary frames preserve mouse navigation.
-                if self.x_limits_pending.replace(false)
-                    || plot_ui.auto_bounds().x
-                    || plot_ui.response().double_clicked()
-                    || changed_scales[0]
-                {
-                    plot_ui.set_plot_bounds_x(lower..=upper);
-                }
-            }
-
-            if let Some((lower, upper)) = transformed_y_limits {
-                // Apply new limits once; ordinary frames preserve mouse navigation.
-                if self.y_limits_pending.replace(false)
-                    || plot_ui.auto_bounds().y
-                    || plot_ui.response().double_clicked()
-                    || changed_scales[1]
-                {
-                    plot_ui.set_plot_bounds_y(lower..=upper);
-                }
-            }
-
-            for (index, (line, segments)) in self.series.iter().zip(transformed_series).enumerate()
-            {
-                let colour = MATPLOTLIB_COLORS[index % MATPLOTLIB_COLORS.len()];
-                let legend_name = line.label.as_deref().unwrap_or_default();
-                let segment_count = segments.len();
-
-                for (segment_index, points) in segments.into_iter().enumerate() {
-                    let line_name = if segment_count == 1 {
-                        format!("series_{index}")
-                    } else {
-                        format!("series_{index}_segment_{segment_index}")
-                    };
-                    let plot_line = Line::new(line_name, PlotPoints::from(points))
-                        .name(legend_name)
-                        .color(colour)
-                        .width(DEFAULT_LINE_WIDTH);
-
-                    plot_ui.line(plot_line);
-                }
-            }
-
-            let colour_offset = self.series.len();
-
-            for (index, (line, value)) in self
-                .horizontal_lines
-                .iter()
-                .zip(transformed_horizontal_lines)
-                .enumerate()
-            {
-                let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
-                let legend_name = line.label.as_deref().unwrap_or_default();
-
-                let plot_line = HLine::new(format!("hline_{index}"), value)
-                    .name(legend_name)
-                    .color(colour)
-                    .width(DEFAULT_LINE_WIDTH)
-                    .style(LineStyle::dashed_dense());
-
-                plot_ui.hline(plot_line);
-            }
-
-            let colour_offset = colour_offset + self.horizontal_lines.len();
-
-            for (index, (line, value)) in self
-                .vertical_lines
-                .iter()
-                .zip(transformed_vertical_lines)
-                .enumerate()
-            {
-                let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
-                let legend_name = line.label.as_deref().unwrap_or_default();
-
-                let plot_line = VLine::new(format!("vline_{index}"), value)
-                    .name(legend_name)
-                    .color(colour)
-                    .width(DEFAULT_LINE_WIDTH)
-                    .style(LineStyle::dashed_dense());
-
-                plot_ui.vline(plot_line);
-            }
+            self.apply_bounds(plot_ui, x_limits, y_limits, changed_scales);
+            self.add_series(plot_ui, series_segments);
+            self.add_horizontal_lines(plot_ui, horizontal_lines);
+            self.add_vertical_lines(plot_ui, vertical_lines);
         });
         ui.set_style(original_style);
 
