@@ -309,6 +309,37 @@ fn slider_app_renders_caches_switches_views_and_resets() {
 }
 
 #[test]
+fn standalone_app_switches_views_with_arrow_keys() {
+    use eframe::App as _;
+
+    COMPUTATIONS.set(0);
+    const VIEWS: &[ViewOption<Params>] = &[
+        ViewOption::new("Signal", success, controls),
+        ViewOption::new("Error", failure, controls),
+    ];
+    let ctx = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", "canvas", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut draw = |time, events| ctx.run(input(time, events), |ctx| app.update(ctx, &mut frame));
+
+    let output = draw(0.0, vec![]);
+    assert!(contains_text(&output, "Amplitude: 0"));
+    assert_eq!(COMPUTATIONS.get(), 1);
+
+    let output = draw(0.1, key(egui::Key::ArrowRight));
+    assert!(contains_text(&output, "example computation failed"));
+    assert_eq!(COMPUTATIONS.get(), 2);
+
+    draw(0.2, key(egui::Key::ArrowRight));
+    assert_eq!(COMPUTATIONS.get(), 2);
+
+    let output = draw(0.3, key(egui::Key::ArrowLeft));
+    assert!(contains_text(&output, "Amplitude: 0"));
+    assert_eq!(COMPUTATIONS.get(), 3);
+}
+
+#[test]
 fn app_reset_restores_navigation_for_every_view() {
     use eframe::App as _;
 

@@ -4,17 +4,11 @@ use eframe::egui;
 
 trait MenuContent {
     fn show_ui(&mut self, ui: &mut egui::Ui);
-
-    fn navigate_view(&mut self, _step: isize) {}
 }
 
 impl<P: Default + 'static> MenuContent for App<P> {
     fn show_ui(&mut self, ui: &mut egui::Ui) {
         App::show_ui(self, ui);
-    }
-
-    fn navigate_view(&mut self, step: isize) {
-        App::navigate_view(self, step);
     }
 }
 
@@ -52,8 +46,8 @@ impl MenuEntry {
 
 /// A native window with a selector for independently configured apps and figures.
 /// Entries are created on first selection and retained when switching away.
-/// Unmodified up/down arrows select entries and left/right arrows select app views,
-/// stopping at either end. Focused widgets retain their keyboard input.
+/// Unmodified up/down arrows select entries. Apps handle their own view navigation.
+/// Focused widgets retain their keyboard input.
 pub struct AppMenu {
     title: String,
     entries: Vec<MenuEntry>,
@@ -121,11 +115,7 @@ impl AppMenu {
             let mut keys = Vec::new();
             input.events.retain(|event| {
                 if let egui::Event::Key {
-                    key:
-                        key @ (egui::Key::ArrowUp
-                        | egui::Key::ArrowDown
-                        | egui::Key::ArrowLeft
-                        | egui::Key::ArrowRight),
+                    key: key @ (egui::Key::ArrowUp | egui::Key::ArrowDown),
                     pressed: true,
                     modifiers: egui::Modifiers::NONE,
                     ..
@@ -151,8 +141,6 @@ impl AppMenu {
                 egui::Key::ArrowDown => {
                     self.selected = (self.selected + 1).min(self.entries.len() - 1);
                 }
-                egui::Key::ArrowLeft => self.entries[self.selected].content().navigate_view(-1),
-                egui::Key::ArrowRight => self.entries[self.selected].content().navigate_view(1),
                 _ => unreachable!(),
             }
         }
@@ -306,10 +294,6 @@ mod tests {
             fn show_ui(&mut self, ui: &mut egui::Ui) {
                 ui.text_edit_singleline(&mut *self.0.borrow_mut())
                     .request_focus();
-            }
-
-            fn navigate_view(&mut self, _: isize) {
-                panic!("focused editor must retain arrow input");
             }
         }
         let text = Rc::new(RefCell::new(String::from("abc")));

@@ -1,14 +1,14 @@
 //! Run with `cargo run --example two_views`.
 //!
-//! Switch views with the buttons or keys 1/2; reset all parameters with R.
+//! Switch views with the buttons, keys 1/2, or left/right arrows; reset with R.
 //! Each view keeps its own slider values when switching between them.
 //! This is a native example; the WASM entry point is a compilation-only stub.
 
+use myplotlib::AxisScale;
 #[cfg(not(target_arch = "wasm32"))]
 use myplotlib::{AppDefinition, AppResult, Plotter, Slider, SliderGrid, SliderGroup, ViewOption};
 #[cfg(not(target_arch = "wasm32"))]
 use std::f64::consts::{PI, TAU};
-use myplotlib::AxisScale;
 
 #[cfg(not(target_arch = "wasm32"))]
 struct Params {

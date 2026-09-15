@@ -83,6 +83,40 @@ fn view_selector<P>(selected: &mut usize, options: &[ViewOption<P>], ui: &mut Ui
     let mut changed = false;
 
     if !ui.ctx().wants_keyboard_input() {
+        let arrows = ui.input_mut(|input| {
+            let mut arrows = Vec::new();
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    //'@' means check event.key == (ArrowLeft | ArrowRight), then bind to key
+                    key: key @ (egui::Key::ArrowLeft | egui::Key::ArrowRight),
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                    ..
+                } = event
+                {
+                    arrows.push(*key);
+                    false
+                } else {
+                    true
+                }
+            });
+            arrows
+        });
+        if !arrows.is_empty() {
+            // egui schedules directional focus movement before these events are consumed.
+            ui.ctx()
+                .memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+        }
+        for arrow in arrows {
+            let next = match arrow {
+                egui::Key::ArrowLeft => selected.saturating_sub(1),
+                egui::Key::ArrowRight => (*selected + 1).min(options.len() - 1),
+                _ => unreachable!(),
+            };
+            changed |= *selected != next;
+            *selected = next;
+        }
+
         for (index, key) in (0..options.len()).zip(VIEW_KEYS) {
             let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::NONE, key);
 
@@ -143,19 +177,6 @@ where
 
     fn selected_option(&self) -> &ViewOption<P> {
         &self.definition.views[self.selected_view]
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn navigate_view(&mut self, step: isize) {
-        let selected = self
-            .selected_view
-            .saturating_add_signed(step)
-            .min(self.definition.views.len() - 1);
-        if selected != self.selected_view {
-            self.selected_view = selected;
-            self.cached_plotter = None;
-            self.compute_time = None;
-        }
     }
 
     fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool) {
