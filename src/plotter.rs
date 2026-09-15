@@ -111,7 +111,7 @@ fn log10_grid_marks(input: GridInput) -> Vec<GridMark> {
 
     for exponent in (first_major..=last_decade).step_by(major_stride as usize) {
         let value = exponent as f64;
-        if value >= lower {
+        if (lower..upper).contains(&value) {
             marks.push(GridMark {
                 value,
                 step_size: major_stride as f64,
@@ -124,7 +124,7 @@ fn log10_grid_marks(input: GridInput) -> Vec<GridMark> {
         for exponent in first_decade..last_decade {
             for multiplier in 2..10 {
                 let value = exponent as f64 + (multiplier as f64).log10();
-                if (lower..=upper).contains(&value) {
+                if (lower..upper).contains(&value) {
                     marks.push(GridMark {
                         value,
                         step_size: 0.1,
@@ -585,6 +585,23 @@ mod tests {
                 .iter()
                 .any(|mark| (mark.value - 2.0_f64.log10()).abs() < 1e-12)
         );
+    }
+
+    #[test]
+    fn log_grid_excludes_marks_outside_visible_bounds() {
+        let lower = -4.5;
+        let upper = 6.5;
+        let marks = log10_grid_marks(GridInput {
+            bounds: (lower, upper),
+            base_step_size: 0.2,
+        });
+
+        assert!(
+            marks
+                .iter()
+                .all(|mark| (lower..upper).contains(&mark.value))
+        );
+        assert!(!marks.iter().any(|mark| mark.value == 7.0));
     }
 
     #[test]
