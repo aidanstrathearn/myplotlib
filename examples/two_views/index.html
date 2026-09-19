@@ -86,15 +86,14 @@
     </main>
 
     <script type="module">
-      import init, { mountApp } from "./pkg/app.js";
+      import { mountApp } from "../../web/loader.js";
 
       const canvases = document.querySelectorAll("[data-myplotlib-app]");
-      let handles = [];
+      const module = new URL("./pkg/app.js", import.meta.url);
 
       try {
-        await init();
-        handles = await Promise.all(
-          Array.from(canvases, (canvas) => mountApp(canvas)),
+        await Promise.all(
+          Array.from(canvases, (canvas) => mountApp({ canvas, module })),
         );
       } catch (error) {
         document.querySelector("#error").textContent = String(error);

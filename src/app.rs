@@ -309,24 +309,21 @@ pub struct WebHandle {
 #[wasm_bindgen::prelude::wasm_bindgen]
 impl WebHandle {
     /// Shut down the application and release its browser resources.
+    ///
+    /// Web handles are finalized by JavaScript at an unspecified time, so
+    /// dropping a handle does not destroy its runner. Call this method when
+    /// the canvas is unmounted.
     pub fn destroy(&self) {
-        self.runner.destroy();
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl Drop for WebHandle {
-    fn drop(&mut self) {
         self.runner.destroy();
     }
 }
 
 /// Mount a new application instance into a canvas supplied by the host page.
 ///
-/// Each call creates independent application state. The caller must retain the
-/// returned handle for as long as the application should remain mounted. Call
-/// [`WebHandle::destroy`] to release its event handlers and graphics resources;
-/// dropping the handle performs the same cleanup.
+/// Each call creates independent application state. Retain the returned handle
+/// so that [`WebHandle::destroy`] can be called when the canvas is unmounted.
+/// Dropping the handle does not destroy the runner because JavaScript garbage
+/// collection is nondeterministic.
 ///
 /// This function resolves only after eframe has started successfully and
 /// returns any startup error to the caller.
