@@ -46,6 +46,22 @@ function abortError() {
   return new DOMException("The Myplotlib mount was superseded", "AbortError");
 }
 
+function assertCanvas(canvas) {
+  if (
+    canvas === null ||
+    (typeof canvas !== "object" && typeof canvas !== "function")
+  ) {
+    throw new TypeError("canvas must be an HTMLCanvasElement");
+  }
+
+  const Canvas =
+    canvas.ownerDocument?.defaultView?.HTMLCanvasElement ??
+    globalThis.HTMLCanvasElement;
+  if (typeof Canvas === "function" && !(canvas instanceof Canvas)) {
+    throw new TypeError("canvas must be an HTMLCanvasElement");
+  }
+}
+
 function destroyHandle(state) {
   if (state.handle !== undefined && !state.destroyed) {
     state.destroyed = true;
@@ -78,9 +94,7 @@ async function dispose(state) {
  * @returns {Promise<object>} the application's exported WebHandle
  */
 export function mountApp({ canvas, module }) {
-  if (canvas === null || (typeof canvas !== "object" && typeof canvas !== "function")) {
-    throw new TypeError("canvas must be an HTMLCanvasElement");
-  }
+  assertCanvas(canvas);
 
   const previous = canvas[mountKey];
   if (previous !== undefined) {
@@ -131,6 +145,8 @@ export function mountApp({ canvas, module }) {
  * @returns {Promise<void>}
  */
 export async function unmountApp(canvas) {
+  assertCanvas(canvas);
+
   const state = canvas?.[mountKey];
   if (state === undefined) {
     return;

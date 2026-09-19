@@ -17,6 +17,6 @@ wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
 
 [workspace]
-members = ["examples/two_views"]
+members = ["crates/cargo-myplotlib", "examples/two_views"]
 default-members = ["."]
 resolver = "3"
