@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Myplotlib web embedding</title>
+    <link data-trunk rel="rust" href="../Cargo.toml" />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, sans-serif;
+        background: #f4f4f4;
+        color: #222;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        max-width: 1500px;
+        margin: 0 auto;
+        padding: 1.5rem;
+      }
+
+      h1 {
+        margin: 0 0 1.5rem;
+        font-size: 1.5rem;
+      }
+
+      .apps {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1.5rem;
+      }
+
+      section {
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid #d2d2d2;
+        border-radius: 0.5rem;
+        background: white;
+      }
+
+      h2 {
+        margin: 0;
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid #d2d2d2;
+        font-size: 1rem;
+      }
+
+      canvas {
+        display: block;
+        width: 100%;
+        height: min(70vh, 650px);
+      }
+
+      #error {
+        color: #a40000;
+      }
+
+      @media (max-width: 900px) {
+        .apps {
+          grid-template-columns: 1fr;
+        }
+
+        canvas {
+          height: 500px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Two independently mounted Myplotlib applications</h1>
+      <div class="apps">
+        <section>
+          <h2>Instance one</h2>
+          <canvas data-myplotlib-app></canvas>
+        </section>
+        <section>
+          <h2>Instance two</h2>
+          <canvas data-myplotlib-app></canvas>
+        </section>
+      </div>
+      <p id="error" role="alert"></p>
+    </main>
+
+    <script type="module">
+      window.addEventListener("TrunkApplicationStarted", async () => {
+        const canvases = document.querySelectorAll("[data-myplotlib-app]");
+
+        try {
+          window.myplotlibHandles = await Promise.all(
+            Array.from(canvases, (canvas) =>
+              window.wasmBindings.mountApp(canvas),
+            ),
+          );
+        } catch (error) {
+          document.querySelector("#error").textContent = String(error);
+          throw error;
+        }
+      });
+    </script>
+  </body>
+</html>
