@@ -1217,9 +1217,18 @@ dependencies = [
  "eframe",
  "egui_plot",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+]
+
+[[package]]
+name = "myplotlib-two-views"
+version = "0.1.0"
+dependencies = [
+ "myplotlib",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

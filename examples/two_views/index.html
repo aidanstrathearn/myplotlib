@@ -4,7 +4,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Myplotlib web embedding</title>
-    <link data-trunk rel="rust" href="../Cargo.toml" />
     <style>
       :root {
         color-scheme: light;
@@ -87,20 +86,20 @@
     </main>
 
     <script type="module">
-      window.addEventListener("TrunkApplicationStarted", async () => {
-        const canvases = document.querySelectorAll("[data-myplotlib-app]");
+      import init, { mountApp } from "./pkg/app.js";
 
-        try {
-          window.myplotlibHandles = await Promise.all(
-            Array.from(canvases, (canvas) =>
-              window.wasmBindings.mountApp(canvas),
-            ),
-          );
-        } catch (error) {
-          document.querySelector("#error").textContent = String(error);
-          throw error;
-        }
-      });
+      const canvases = document.querySelectorAll("[data-myplotlib-app]");
+      let handles = [];
+
+      try {
+        await init();
+        handles = await Promise.all(
+          Array.from(canvases, (canvas) => mountApp(canvas)),
+        );
+      } catch (error) {
+        document.querySelector("#error").textContent = String(error);
+        throw error;
+      }
     </script>
   </body>
 </html>

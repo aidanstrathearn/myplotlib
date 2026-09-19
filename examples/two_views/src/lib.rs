@@ -1,5 +1,4 @@
-//! Run natively with `cargo run --example two_views` or in a browser with
-//! `trunk serve --example two_views examples/two_views.html`.
+//! Application shared by the native and WebAssembly two-views examples.
 //!
 //! Switch views with the buttons, keys 1/2, or left/right arrows; reset with R.
 //! Each view keeps its own slider values when switching between them.
@@ -99,7 +98,6 @@ fn parabola_plot(params: &mut Params) -> AppResult {
     let mut plot = Plotter::new();
     plot.add_points(points).label("Parabola");
     plot.axvline(params.center).label("Center");
-    //plot.axhline(params.offset).label("Offset");
     plot.xlabel("x");
     plot.ylabel("y");
     plot.yscale(AxisScale::Log10);
@@ -116,18 +114,15 @@ fn definition() -> AppDefinition<Params> {
     AppDefinition::new("Two plots", VIEWS)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_native() -> myplotlib::NativeResult {
+    myplotlib::run_native(definition())
+}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = mountApp)]
 pub async fn mount_app(
     canvas: web_sys::HtmlCanvasElement,
 ) -> Result<myplotlib::WebHandle, JsValue> {
     myplotlib::mount_web(canvas, definition()).await
-}
-
-#[cfg(target_arch = "wasm32")]
-fn main() {}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn main() -> myplotlib::NativeResult {
-    myplotlib::run_native(definition())
 }

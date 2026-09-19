@@ -16,8 +16,7 @@ eframe = { version = "0.33.3", default-features = false, features = ["default_fo
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-futures = "0.4"
-
 [workspace]
+members = ["examples/two_views"]
+default-members = ["."]
 resolver = "3"
