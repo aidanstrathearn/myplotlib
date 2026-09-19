@@ -43,27 +43,18 @@ impl<P> ViewOption<P> {
 }
 
 pub struct AppDefinition<P: 'static> {
-    #[cfg(not(target_arch = "wasm32"))]
     title: &'static str,
-    #[cfg(target_arch = "wasm32")]
-    canvas_id: &'static str,
     views: &'static [ViewOption<P>],
 }
 
 impl<P> AppDefinition<P> {
-    pub const fn new(
-        _title: &'static str,
-        _canvas_id: &'static str,
-        views: &'static [ViewOption<P>],
-    ) -> Self {
+    pub const fn new(title: &'static str, views: &'static [ViewOption<P>]) -> Self {
         assert!(!views.is_empty(), "an app must have at least one view");
-        Self {
-            #[cfg(not(target_arch = "wasm32"))]
-            title: _title,
-            #[cfg(target_arch = "wasm32")]
-            canvas_id: _canvas_id,
-            views,
-        }
+        Self { title, views }
+    }
+
+    pub const fn title(&self) -> &'static str {
+        self.title
     }
 }
 
@@ -309,35 +300,52 @@ where
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn run_web<P>(definition: AppDefinition<P>) -> WebResult
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub struct WebHandle {
+    runner: eframe::WebRunner,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+impl WebHandle {
+    /// Shut down the application and release its browser resources.
+    pub fn destroy(&self) {
+        self.runner.destroy();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WebHandle {
+    fn drop(&mut self) {
+        self.runner.destroy();
+    }
+}
+
+/// Mount a new application instance into a canvas supplied by the host page.
+///
+/// Each call creates independent application state. The caller must retain the
+/// returned handle for as long as the application should remain mounted. Call
+/// [`WebHandle::destroy`] to release its event handlers and graphics resources;
+/// dropping the handle performs the same cleanup.
+///
+/// This function resolves only after eframe has started successfully and
+/// returns any startup error to the caller.
+#[cfg(target_arch = "wasm32")]
+pub async fn mount_web<P>(
+    canvas: web_sys::HtmlCanvasElement,
+    definition: AppDefinition<P>,
+) -> WebResult<WebHandle>
 where
     P: Default + 'static,
 {
-    use wasm_bindgen::JsCast as _;
+    let runner = eframe::WebRunner::new();
+    runner
+        .start(
+            canvas,
+            eframe::WebOptions::default(),
+            Box::new(move |creation_context| Ok(Box::new(App::new(creation_context, definition)))),
+        )
+        .await?;
 
-    let window =
-        web_sys::window().ok_or_else(|| wasm_bindgen::JsValue::from_str("missing window"))?;
-    let document = window
-        .document()
-        .ok_or_else(|| wasm_bindgen::JsValue::from_str("missing document"))?;
-    let canvas = document
-        .get_element_by_id(definition.canvas_id)
-        .ok_or_else(|| {
-            wasm_bindgen::JsValue::from_str(&format!("missing #{}", definition.canvas_id))
-        })?
-        .dyn_into::<web_sys::HtmlCanvasElement>()?;
-
-    let runner = Box::leak(Box::new(eframe::WebRunner::new()));
-    wasm_bindgen_futures::spawn_local(async move {
-        runner
-            .start(
-                canvas,
-                eframe::WebOptions::default(),
-                Box::new(|creation_context| Ok(Box::new(App::new(creation_context, definition)))),
-            )
-            .await
-            .expect("failed to start eframe");
-    });
-
-    Ok(())
+    Ok(WebHandle { runner })
 }

@@ -262,7 +262,7 @@ fn slider_app_renders_caches_switches_views_and_resets() {
     ];
     let ctx = egui::Context::default();
     let creation = eframe::CreationContext::_new_kittest(ctx.clone());
-    let mut app = App::new(&creation, AppDefinition::new("Test", "canvas", VIEWS));
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
     let mut frame = eframe::Frame::_new_kittest();
     let mut draw = |time, events| ctx.run(input(time, events), |ctx| app.update(ctx, &mut frame));
 
@@ -319,7 +319,7 @@ fn standalone_app_switches_views_with_arrow_keys() {
     ];
     let ctx = egui::Context::default();
     let creation = eframe::CreationContext::_new_kittest(ctx.clone());
-    let mut app = App::new(&creation, AppDefinition::new("Test", "canvas", VIEWS));
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
     let mut frame = eframe::Frame::_new_kittest();
     let mut draw = |time, events| ctx.run(input(time, events), |ctx| app.update(ctx, &mut frame));
 
@@ -366,7 +366,7 @@ fn app_reset_restores_navigation_for_every_view() {
         });
     });
     let creation = eframe::CreationContext::_new_kittest(ctx.clone());
-    let mut app = App::new(&creation, AppDefinition::new("Test", "canvas", VIEWS));
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
     let mut frame = eframe::Frame::_new_kittest();
     let mut time = 0.0;
     let mut draw = |events| {

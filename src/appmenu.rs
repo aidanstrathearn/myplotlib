@@ -269,8 +269,8 @@ mod tests {
             ViewOption::new("Second", second, controls),
         ];
         let mut menu = AppMenu::new("Apps")
-            .app("One", AppDefinition::new("One", "one", VIEWS))
-            .app("Two", AppDefinition::new("Two", "two", VIEWS));
+            .app("One", AppDefinition::new("One", VIEWS))
+            .app("Two", AppDefinition::new("Two", VIEWS));
         let ctx = egui::Context::default();
         // Navigation also works before the first lazy instance has been drawn.
         draw_events(&mut menu, &ctx, key(egui::Key::ArrowRight));

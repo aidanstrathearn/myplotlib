@@ -1217,7 +1217,6 @@ dependencies = [
  "eframe",
  "egui_plot",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
  "web-time",
 ]

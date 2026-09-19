@@ -9,7 +9,7 @@ pub use app::{App, AppDefinition, AppError, AppResult, ControlsAction, PlotActio
 #[cfg(not(target_arch = "wasm32"))]
 pub use app::{NativeResult, run_native};
 #[cfg(target_arch = "wasm32")]
-pub use app::{WebResult, run_web};
+pub use app::{WebHandle, WebResult, mount_web};
 #[cfg(not(target_arch = "wasm32"))]
 pub use appmenu::AppMenu;
 pub use controls::{Slider, SliderGrid, SliderGroup};

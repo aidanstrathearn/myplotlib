@@ -122,5 +122,5 @@ fn main() -> myplotlib::NativeResult {
         ViewOption::new("Parabola", parabola_plot, parabola_controls),
     ];
 
-    myplotlib::run_native(AppDefinition::new("Two plots", "plot-canvas", VIEWS))
+    myplotlib::run_native(AppDefinition::new("Two plots", VIEWS))
 }

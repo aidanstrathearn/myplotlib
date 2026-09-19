@@ -50,10 +50,7 @@ fn main() -> myplotlib::NativeResult {
 
     const VIEWS: &[ViewOption<Params>] = &[ViewOption::new("Wave", wave, controls)];
     AppMenu::new("Plot examples")
-        .app(
-            "Adjustable wave",
-            AppDefinition::new("Wave", "wave-canvas", VIEWS),
-        )
+        .app("Adjustable wave", AppDefinition::new("Wave", VIEWS))
         .figure("Two subplots", figure)
         .run_native()
 }
