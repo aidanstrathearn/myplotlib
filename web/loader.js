@@ -1,5 +1,6 @@
 const mountKey = Symbol.for("myplotlib.webMount");
 const modulePromises = new Map();
+const rayonPools = new WeakMap();
 
 function moduleUrl(specifier) {
   if (specifier instanceof URL) {
@@ -62,6 +63,45 @@ function assertCanvas(canvas) {
   }
 }
 
+async function ensureThreadPool(bindings, threads) {
+  const initialize = bindings.initThreadPool;
+
+  if (typeof initialize !== "function") {
+    if (threads !== undefined) {
+      throw new Error("This application does not support WebAssembly threads");
+    }
+    return;
+  }
+
+  if (!Number.isSafeInteger(threads) || threads < 1) {
+    throw new Error(
+      "This application requires a positive integer `threads` option",
+    );
+  }
+
+  if (globalThis.crossOriginIsolated !== true) {
+    throw new Error("WebAssembly threads require cross-origin isolation");
+  }
+
+  const existing = rayonPools.get(bindings);
+  if (existing !== undefined) {
+    if (existing.threads !== threads) {
+      throw new Error(
+        `Rayon is already initialized with ${existing.threads} threads`,
+      );
+    }
+    await existing.ready;
+    return;
+  }
+
+  const pool = {
+    threads,
+    ready: initialize(threads),
+  };
+  rayonPools.set(bindings, pool);
+  await pool.ready;
+}
+
 function destroyHandle(state) {
   if (state.handle !== undefined && !state.destroyed) {
     state.destroyed = true;
@@ -90,10 +130,13 @@ async function dispose(state) {
  * handle is also retained on the canvas so JavaScript garbage collection
  * cannot finalize it while the canvas remains mounted.
  *
- * @param {{canvas: HTMLCanvasElement, module: string | URL}} options
+ * Applications that export `initThreadPool` must supply a positive thread
+ * count. Their Rayon pool is initialized once before the first canvas mounts.
+ *
+ * @param {{canvas: HTMLCanvasElement, module: string | URL, threads?: number}} options
  * @returns {Promise<object>} the application's exported WebHandle
  */
-export function mountApp({ canvas, module }) {
+export function mountApp({ canvas, module, threads }) {
   assertCanvas(canvas);
 
   const previous = canvas[mountKey];
@@ -116,6 +159,11 @@ export function mountApp({ canvas, module }) {
     }
 
     const bindings = await loadModule(module);
+    if (state.cancelled || canvas[mountKey] !== state) {
+      throw abortError();
+    }
+
+    await ensureThreadPool(bindings, threads);
     if (state.cancelled || canvas[mountKey] !== state) {
       throw abortError();
     }

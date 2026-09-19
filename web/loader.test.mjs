@@ -16,6 +16,13 @@ function fakeModule(t, bridge) {
   globalThis[key] = bridge;
   t.after(() => delete globalThis[key]);
 
+  const threadPoolExport = Object.hasOwn(bridge, "initThreadPool")
+    ? `
+      export function initThreadPool(threads) {
+        return globalThis[${JSON.stringify(key)}].initThreadPool(threads);
+      }
+    `
+    : "";
   const source = `
     export default function init() {
       return globalThis[${JSON.stringify(key)}].init();
@@ -23,8 +30,27 @@ function fakeModule(t, bridge) {
     export function mountApp(canvas) {
       return globalThis[${JSON.stringify(key)}].mount(canvas);
     }
+    ${threadPoolExport}
   `;
   return new URL(`data:text/javascript,${encodeURIComponent(source)}`);
+}
+
+function crossOriginIsolated(t, value) {
+  const previous = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "crossOriginIsolated",
+  );
+  Object.defineProperty(globalThis, "crossOriginIsolated", {
+    configurable: true,
+    value,
+  });
+  t.after(() => {
+    if (previous === undefined) {
+      delete globalThis.crossOriginIsolated;
+    } else {
+      Object.defineProperty(globalThis, "crossOriginIsolated", previous);
+    }
+  });
 }
 
 function deferred() {
@@ -214,6 +240,116 @@ test("failed mounting leaves the canvas reusable", async (t) => {
   assert.equal(mounts, 2);
   await unmountApp(canvas);
   assert.deepEqual(destroyed, ["recovered"]);
+});
+
+test("rejects a thread count for a non-threaded application", async (t) => {
+  const { mountApp } = await freshLoader();
+  let mounts = 0;
+  const module = fakeModule(t, {
+    init() {},
+    mount() {
+      mounts += 1;
+    },
+  });
+
+  await assert.rejects(
+    mountApp({ canvas: {}, module, threads: 4 }),
+    /does not support WebAssembly threads/,
+  );
+  assert.equal(mounts, 0);
+});
+
+test("requires an explicit thread count for a threaded application", async (t) => {
+  const { mountApp } = await freshLoader();
+  crossOriginIsolated(t, true);
+  let poolInitializations = 0;
+  let mounts = 0;
+  const module = fakeModule(t, {
+    init() {},
+    initThreadPool() {
+      poolInitializations += 1;
+    },
+    mount() {
+      mounts += 1;
+    },
+  });
+
+  await assert.rejects(
+    mountApp({ canvas: {}, module }),
+    /positive integer `threads` option/,
+  );
+  assert.equal(poolInitializations, 0);
+  assert.equal(mounts, 0);
+});
+
+test("initializes one Rayon pool for every canvas from a module", async (t) => {
+  const { mountApp, unmountApp } = await freshLoader();
+  crossOriginIsolated(t, true);
+  const destroyed = [];
+  const threadCounts = [];
+  let mounts = 0;
+  const module = fakeModule(t, {
+    init() {},
+    initThreadPool(threads) {
+      threadCounts.push(threads);
+    },
+    mount() {
+      mounts += 1;
+      return handle(`threaded-${mounts}`, destroyed);
+    },
+  });
+  const firstCanvas = {};
+  const secondCanvas = {};
+
+  await Promise.all([
+    mountApp({ canvas: firstCanvas, module, threads: 8 }),
+    mountApp({ canvas: secondCanvas, module, threads: 8 }),
+  ]);
+
+  assert.deepEqual(threadCounts, [8]);
+  assert.equal(mounts, 2);
+  await unmountApp(firstCanvas);
+  await unmountApp(secondCanvas);
+});
+
+test("rejects a different count after Rayon is initialized", async (t) => {
+  const { mountApp, unmountApp } = await freshLoader();
+  crossOriginIsolated(t, true);
+  const destroyed = [];
+  const module = fakeModule(t, {
+    init() {},
+    initThreadPool() {},
+    mount() {
+      return handle("threaded", destroyed);
+    },
+  });
+  const mountedCanvas = {};
+
+  await mountApp({ canvas: mountedCanvas, module, threads: 8 });
+  await assert.rejects(
+    mountApp({ canvas: {}, module, threads: 4 }),
+    /already initialized with 8 threads/,
+  );
+  await unmountApp(mountedCanvas);
+});
+
+test("reports missing cross-origin isolation before starting Rayon", async (t) => {
+  const { mountApp } = await freshLoader();
+  crossOriginIsolated(t, false);
+  let poolInitializations = 0;
+  const module = fakeModule(t, {
+    init() {},
+    initThreadPool() {
+      poolInitializations += 1;
+    },
+    mount() {},
+  });
+
+  await assert.rejects(
+    mountApp({ canvas: {}, module, threads: 8 }),
+    /require cross-origin isolation/,
+  );
+  assert.equal(poolInitializations, 0);
 });
 
 test("rejects non-canvas browser elements", async () => {

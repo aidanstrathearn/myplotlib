@@ -9,7 +9,7 @@ const bindingsModule = new URL("./bindings.js", import.meta.url);
  * Mount this application into a canvas supplied by the host page.
  *
  * @param {HTMLCanvasElement} canvas
- * @param {Record<string, unknown>} options reserved application startup options
+ * @param {{threads?: number}} options application startup options
  * @returns {Promise<object>} the application's exported WebHandle
  */
 export function mount(canvas, options = {}) {
