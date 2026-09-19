@@ -9,29 +9,38 @@ Run it natively from the Myplotlib repository root:
 cargo run --manifest-path examples/two_views/Cargo.toml
 ```
 
-Build the web package with deterministic output names:
+Install the Myplotlib build command from the repository root:
 
 ```sh
+cargo install --path crates/cargo-myplotlib --locked
+```
+
+Build the self-contained web package and serve the example:
+
+```sh
+cargo myplotlib build-web \
+  --manifest-path examples/two_views/Cargo.toml \
+  --out-dir examples/two_views/pkg \
+  --release \
+  --locked
 cd examples/two_views
-wasm-pack build --target web --release --out-dir pkg --out-name app --no-typescript --no-pack
-cd ../..
 python3 -m http.server 8080
 ```
 
-Then open <http://127.0.0.1:8080/examples/two_views/>. Serving the repository
-root makes the shared `web/loader.js` available to the example. The loader
-initializes `pkg/app.js` once, mounts it into both canvases, and retains each
-application handle until its canvas is explicitly unmounted.
+Then open <http://127.0.0.1:8080/>. The generated `pkg/app.js` owns Wasm
+initialization and application lifetime, so the example does not copy or
+directly import Myplotlib's loader.
 
-Applications built from different crates use the same API with a different
-module URL for each canvas:
+Applications built from different crates expose the same small API from their
+own generated entry modules:
 
 ```js
-import { mountApp, unmountApp } from "/web/loader.js";
+import { mount as mountMts, unmount as unmountMts } from "/apps/mts/app.js";
+import { mount as mountDfb } from "/apps/dfb/app.js";
 
-await mountApp({ canvas: mtsCanvas, module: "/apps/mts/app.js" });
-await mountApp({ canvas: dfbCanvas, module: "/apps/dfb/app.js" });
+await mountMts(mtsCanvas);
+await mountDfb(dfbCanvas);
 
 // Call this before removing a mounted canvas from a long-lived page.
-await unmountApp(mtsCanvas);
+await unmountMts(mtsCanvas);
 ```

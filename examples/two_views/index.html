@@ -79,26 +79,28 @@
         </section>
         <section>
           <h2>Instance two</h2>
-          <canvas data-myplotlib-app></canvas>
+          <canvas data-myplotlib-app2></canvas>
         </section>
       </div>
       <p id="error" role="alert"></p>
     </main>
 
     <script type="module">
-      import { mountApp } from "../../web/loader.js";
+      import { mount } from "./pkg/app.js";
+      const canvas1 = document.querySelector("[data-myplotlib-app]");
+      const canvas2 = document.querySelector("[data-myplotlib-app2]");
+      mount(canvas1);
+      mount(canvas2);
 
-      const canvases = document.querySelectorAll("[data-myplotlib-app]");
-      const module = new URL("./pkg/app.js", import.meta.url);
-
-      try {
-        await Promise.all(
-          Array.from(canvases, (canvas) => mountApp({ canvas, module })),
-        );
-      } catch (error) {
-        document.querySelector("#error").textContent = String(error);
-        throw error;
-      }
+      // const canvases = document.querySelectorAll("[data-myplotlib-app]");
+      // try {
+      //   await Promise.all(
+      //     Array.from(canvases, (canvas) => mount(canvas)),
+      //   );
+      // } catch (error) {
+      //   document.querySelector("#error").textContent = String(error);
+      //   throw error;
+      // }
     </script>
   </body>
 </html>
