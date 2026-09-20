@@ -354,15 +354,13 @@ fn app_reset_restores_navigation_for_every_view() {
         ViewOption::new("Automatic limits", automatic_bounds, controls),
     ];
     let ctx = egui::Context::default();
-    // Capture the plot IDs in the same panel/scroll-area scope used by the app.
+    // Capture the plot IDs in the same panel scope used by the app.
     let mut ids = [egui::Id::NULL; 2];
     let _ = ctx.run(input(0.0, vec![]), |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::both().show(ui, |ui| {
-                for (view, id) in ids.iter_mut().enumerate() {
-                    *id = ui.make_persistent_id(egui::Id::new(("plot-app", view)));
-                }
-            });
+            for (view, id) in ids.iter_mut().enumerate() {
+                *id = ui.make_persistent_id(egui::Id::new(("plot-app", view)));
+            }
         });
     });
     let creation = eframe::CreationContext::_new_kittest(ctx.clone());

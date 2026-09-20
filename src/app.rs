@@ -246,26 +246,28 @@ where
     P: Default + 'static,
 {
     pub(crate) fn show_ui(&mut self, ui: &mut Ui) {
-        egui::ScrollArea::both().show(ui, |ui| {
-            let (view_changed, reset_requested) = self.draw_header(ui);
-            let mut changed = view_changed;
-            if reset_requested {
-                self.reset(ui);
-                changed = true;
-            }
+        let (view_changed, reset_requested) = self.draw_header(ui);
+        let mut changed = view_changed;
+        if reset_requested {
+            self.reset(ui);
+            changed = true;
+        }
 
-            ui.separator();
+        ui.separator();
 
-            changed |= self.draw_controls(ui);
-            if changed || self.cached_plotter.is_none() {
-                self.recompute_plot();
-                ui.ctx().request_repaint();
-            }
+        changed |= egui::ScrollArea::horizontal()
+            .id_salt(("plot-app-controls", self.selected_view))
+            .auto_shrink([false, true])
+            .show(ui, |ui| self.draw_controls(ui))
+            .inner;
+        if changed || self.cached_plotter.is_none() {
+            self.recompute_plot();
+            ui.ctx().request_repaint();
+        }
 
-            ui.separator();
+        ui.separator();
 
-            self.draw_plot(ui);
-        });
+        self.draw_plot(ui);
     }
 }
 
