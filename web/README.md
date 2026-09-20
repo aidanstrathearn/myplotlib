@@ -26,7 +26,9 @@ Applications without `initThreadPool` continue to mount without options.
 `app.js` is the public application entry module emitted by
 `cargo myplotlib build-web`. The command writes it as `app.js`, copies the
 runtime as `myplotlib-loader.js`, and asks wasm-pack to emit `bindings.js` and
-`bindings_bg.wasm` beside them.
+`bindings_bg.wasm` beside them. It also exports `cargoMyplotlibVersion` and
+`myplotlibWebPackageVersion`, allowing hosts to identify the build tool release
+and generated-package contract.
 
 A host page uses only the generated entry module:
 

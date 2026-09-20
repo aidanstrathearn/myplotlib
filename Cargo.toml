@@ -1,7 +1,7 @@
 [package]
 name = "myplotlib"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 publish = false
 
 [dependencies]
@@ -20,3 +20,7 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
 members = ["crates/cargo-myplotlib", "examples/two_views"]
 default-members = ["."]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
