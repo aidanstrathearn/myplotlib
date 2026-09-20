@@ -119,17 +119,14 @@ fn view_selector<P>(selected: &mut usize, options: &[ViewOption<P>], ui: &mut Ui
         }
     }
 
-    ui.heading("View: ");
-    ui.horizontal(|ui| {
-        for (index, option) in options.iter().enumerate() {
-            let label = if index < VIEW_KEYS.len() {
-                format!("[{}] {}", index + 1, option.title)
-            } else {
-                option.title.to_owned()
-            };
-            changed |= ui.selectable_value(selected, index, label).changed();
-        }
-    });
+    for (index, option) in options.iter().enumerate() {
+        let label = if index < VIEW_KEYS.len() {
+            format!("[{}] {}", index + 1, option.title)
+        } else {
+            option.title.to_owned()
+        };
+        changed |= ui.selectable_value(selected, index, label).changed();
+    }
 
     changed
 }
@@ -171,22 +168,30 @@ where
     }
 
     fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool) {
-        let mut changed = false;
-        let mut reset_requested = false;
-
-        ui.horizontal(|ui| {
-            changed |= view_selector(&mut self.selected_view, self.definition.views, ui);
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                reset_requested = Self::reset_button(ui);
+        egui::containers::Sides::new().shrink_left().show(
+            ui,
+            |ui| {
+                ui.heading("View: ");
+                egui::ScrollArea::horizontal()
+                    .id_salt("plot-app-view-options")
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            view_selector(&mut self.selected_view, self.definition.views, ui)
+                        })
+                        .inner
+                    })
+                    .inner
+            },
+            |ui| {
+                let reset_requested = Self::reset_button(ui);
                 if let Some(compute_time) = self.compute_time {
                     let milliseconds = compute_time.as_secs_f64() * 1_000.0;
                     ui.label(format!("Compute: {milliseconds:.3} ms"));
                 }
-            });
-        });
-
-        (changed, reset_requested)
+                reset_requested
+            },
+        )
     }
 
     fn reset_button(ui: &mut Ui) -> bool {
