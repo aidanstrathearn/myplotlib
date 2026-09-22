@@ -172,16 +172,21 @@ where
             ui,
             |ui| {
                 ui.heading("View: ");
-                egui::ScrollArea::horizontal()
-                    .id_salt("plot-app-view-options")
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            view_selector(&mut self.selected_view, self.definition.views, ui)
+                ui.scope(|ui| {
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+
+                    egui::ScrollArea::horizontal()
+                        .id_salt("plot-app-view-options")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                view_selector(&mut self.selected_view, self.definition.views, ui)
+                            })
+                            .inner
                         })
                         .inner
-                    })
-                    .inner
+                })
+                .inner
             },
             |ui| {
                 let reset_requested = Self::reset_button(ui);
@@ -260,10 +265,16 @@ where
 
         ui.separator();
 
-        changed |= egui::ScrollArea::horizontal()
-            .id_salt(("plot-app-controls", self.selected_view))
-            .auto_shrink([false, true])
-            .show(ui, |ui| self.draw_controls(ui))
+        changed |= ui
+            .scope(|ui| {
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+
+                egui::ScrollArea::horizontal()
+                    .id_salt(("plot-app-controls", self.selected_view))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| self.draw_controls(ui))
+                    .inner
+            })
             .inner;
         if changed || self.cached_plotter.is_none() {
             self.recompute_plot();
