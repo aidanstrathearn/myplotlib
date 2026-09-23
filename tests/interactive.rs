@@ -37,6 +37,20 @@ fn plot_frame(ctx: &egui::Context, plot: &Plotter, input: egui::RawInput) -> Plo
     PlotMemory::load(ctx, id).unwrap()
 }
 
+fn render_plot(
+    ctx: &egui::Context,
+    plot: &Plotter,
+    input: egui::RawInput,
+) -> (egui::FullOutput, egui::Rect) {
+    let mut plot_rect = egui::Rect::NOTHING;
+    let output = ctx.run(input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            plot_rect = plot.show_ui(ui, "rendered-plot");
+        });
+    });
+    (output, plot_rect)
+}
+
 fn sample_plot() -> Plotter {
     let mut plot = Plotter::new();
     plot.add_points(vec![[0.0, 0.0], [5.0, 1.0], [10.0, 0.0]])
@@ -44,6 +58,31 @@ fn sample_plot() -> Plotter {
     plot.xlim(0.0, 10.0);
     plot.ylim(-2.0, 2.0);
     plot
+}
+
+#[test]
+fn summary_renders_below_the_plot_without_growing_with_more_items() {
+    let plain_context = egui::Context::default();
+    let (_, plain_rect) = render_plot(&plain_context, &sample_plot(), input(0.0, vec![]));
+
+    let mut one_item = sample_plot();
+    one_item.add_summary("Slope", format!("{:.3}", 1.23456));
+    let one_item_context = egui::Context::default();
+    let (output, one_item_rect) = render_plot(&one_item_context, &one_item, input(0.0, vec![]));
+
+    assert!(contains_text(&output, "Slope"));
+    assert!(contains_text(&output, "1.235"));
+    assert_eq!(one_item_rect.width(), plain_rect.width());
+    assert!(one_item_rect.height() < plain_rect.height());
+
+    let mut many_items = sample_plot();
+    for index in 0..12 {
+        many_items.add_summary(format!("Result {index}"), index);
+    }
+    let many_items_context = egui::Context::default();
+    let (_, many_items_rect) = render_plot(&many_items_context, &many_items, input(0.0, vec![]));
+
+    assert_eq!(many_items_rect, one_item_rect);
 }
 
 #[test]

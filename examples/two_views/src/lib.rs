@@ -64,6 +64,8 @@ fn wave_plot(params: &mut Params) -> AppResult {
     plot.xlabel("x (rad)");
     plot.ylabel("Amplitude");
     plot.xlim(0.0, TAU);
+    plot.add_summary("Period", format!("{:.4}", TAU / params.frequency));
+    plot.add_summary("Peak amplitude", params.amplitude);
     Ok(plot)
 }
 
@@ -102,6 +104,8 @@ fn parabola_plot(params: &mut Params) -> AppResult {
     plot.ylabel("y");
     plot.yscale(AxisScale::Log10);
     plot.xlim(-5.0, 5.0);
+    plot.add_summary("Vertex x", params.center);
+    plot.add_summary("Vertex y", params.offset);
     Ok(plot)
 }
 

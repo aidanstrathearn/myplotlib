@@ -3,6 +3,7 @@ use eframe::egui;
 use egui_plot::{
     GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, PlotUi, VLine,
 };
+use std::fmt::Display;
 
 const DEFAULT_LINE_WIDTH: f32 = 3.0;
 const DEFAULT_LABEL_FONT_SIZE: f32 = 24.0;
@@ -229,11 +230,18 @@ impl ReferenceLine {
     }
 }
 
+/// A labeled value displayed in the summary below a plot.
+pub struct SummaryItem {
+    label: String,
+    value: String,
+}
+
 #[derive(Default)]
 pub struct Plotter {
     series: Vec<PlotLine>,
     horizontal_lines: Vec<ReferenceLine>,
     vertical_lines: Vec<ReferenceLine>,
+    summary: Vec<SummaryItem>,
     x_label: String,
     y_label: String,
     pub(crate) title: String,
@@ -314,6 +322,20 @@ impl Plotter {
         });
 
         self.vertical_lines.last_mut().unwrap()
+    }
+
+    /// Adds a labeled value to the summary displayed below the plot.
+    pub fn add_summary(
+        &mut self,
+        label: impl Into<String>,
+        value: impl Display,
+    ) -> &mut SummaryItem {
+        self.summary.push(SummaryItem {
+            label: label.into(),
+            value: value.to_string(),
+        });
+
+        self.summary.last_mut().unwrap()
     }
 
     pub fn xlabel(&mut self, label: impl Into<String>) {
@@ -465,6 +487,42 @@ impl Plotter {
         }
     }
 
+    fn show_summary(&self, ui: &mut egui::Ui, plot_id: egui::Id) {
+        if self.summary.is_empty() {
+            return;
+        }
+
+        let scroll_style = egui::style::ScrollStyle::solid();
+        let row_height = ui
+            .text_style_height(&egui::TextStyle::Body)
+            .max(ui.spacing().interact_size.y);
+        let panel_height =
+            row_height + scroll_style.allocated_width() + 2.0 * ui.spacing().item_spacing.y;
+
+        egui::TopBottomPanel::bottom(plot_id.with("myplotlib_summary_panel"))
+            .resizable(false)
+            .exact_height(panel_height)
+            .show_inside(ui, |ui| {
+                ui.spacing_mut().scroll = scroll_style;
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+                egui::ScrollArea::horizontal()
+                    .id_salt(plot_id.with("myplotlib_summary_scroll"))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (index, item) in self.summary.iter().enumerate() {
+                                if index > 0 {
+                                    ui.separator();
+                                }
+                                ui.label(egui::RichText::new(&item.label).strong());
+                                ui.label(&item.value);
+                            }
+                        });
+                    });
+            });
+    }
+
     /// Opens a native window and blocks until it is closed.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn show(self) -> crate::Result {
@@ -474,8 +532,7 @@ impl Plotter {
     /// Draws into the available UI area. Use a stable, distinct ID for each plot.
     pub fn show_ui(&self, ui: &mut egui::Ui, id: impl std::hash::Hash) -> egui::Rect {
         let render_data = self.transform_for_rendering();
-
-        let axes_rect = ui.available_rect_before_wrap();
+        let plot_id = ui.make_persistent_id(egui::Id::new(&id));
 
         if !self.title.is_empty() {
             ui.vertical_centered(|ui| {
@@ -485,8 +542,10 @@ impl Plotter {
             ui.add_space(4.0);
         }
 
+        self.show_summary(ui, plot_id);
+
+        let axes_rect = ui.available_rect_before_wrap();
         let plot_height = (axes_rect.bottom() - ui.next_widget_position().y).max(1.0);
-        let plot_id = ui.make_persistent_id(egui::Id::new(&id));
         let scale_memory_id = plot_id.with("myplotlib_axis_scales");
         let previous_scales = ui.data_mut(|data| {
             let previous = data.get_temp::<[AxisScale; 2]>(scale_memory_id);
