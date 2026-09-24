@@ -238,8 +238,20 @@ where
             save::status(ui.ctx(), status_id),
             Some(save::SaveStatus::Pending)
         );
-        ui.add_enabled(can_save && !pending, egui::Button::new("Save"))
-            .clicked()
+        let enabled = can_save && !pending;
+        let shortcut = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::S);
+        let shortcut_pressed = enabled
+            && !ui.ctx().wants_keyboard_input()
+            && ui.input_mut(|input| input.consume_shortcut(&shortcut));
+        let shortcut_text = ui.ctx().format_shortcut(&shortcut);
+        let button_clicked = ui
+            .add_enabled(
+                enabled,
+                egui::Button::new("Save").shortcut_text(shortcut_text),
+            )
+            .clicked();
+
+        button_clicked || shortcut_pressed
     }
 
     fn reset(&mut self, ui: &Ui) {

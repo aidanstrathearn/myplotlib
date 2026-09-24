@@ -389,6 +389,29 @@ fn app_save_button_requests_a_screenshot() {
 }
 
 #[test]
+fn app_save_shortcut_requests_a_screenshot() {
+    use eframe::App as _;
+
+    const VIEWS: &[ViewOption<Params>] = &[ViewOption::new("Signal", success, controls)];
+    let ctx = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    let _ = ctx.run(input(0.0, vec![]), |ctx| app.update(ctx, &mut frame));
+    let output = ctx.run(input(0.1, key(egui::Key::S)), |ctx| {
+        app.update(ctx, &mut frame)
+    });
+
+    assert!(output.viewport_output.values().any(|viewport| {
+        viewport
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::Screenshot(_)))
+    }));
+}
+
+#[test]
 fn standalone_app_switches_views_with_arrow_keys() {
     use eframe::App as _;
 
