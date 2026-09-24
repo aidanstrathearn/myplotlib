@@ -23,13 +23,13 @@ cargo myplotlib build-web \
   --out-dir examples/two_views/pkg \
   --release \
   --locked
-cd examples/two_views
-python3 -m http.server 8080
+cargo myplotlib serve --dir examples/two_views
 ```
 
 Then open <http://127.0.0.1:8080/>. The generated `pkg/app.js` owns Wasm
 initialization and application lifetime, so the example does not copy or
-directly import Myplotlib's loader.
+directly import Myplotlib's loader. The server sends COOP and COEP headers on
+every response so threaded builds are cross-origin isolated.
 
 Applications built from different crates expose the same small API from their
 own generated entry modules:

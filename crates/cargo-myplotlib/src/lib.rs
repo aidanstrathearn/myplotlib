@@ -2,8 +2,11 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+mod server;
 
 const LOADER_JS: &str = include_str!("../../../web/loader.js");
 const APP_JS: &str = include_str!("../../../web/app.js");
@@ -16,16 +19,24 @@ Build embeddable Myplotlib web applications
 
 Usage:
   cargo myplotlib build-web [OPTIONS]
+  cargo myplotlib serve [OPTIONS]
   cargo myplotlib --version
 
 Commands:
   build-web    Build a wasm-pack application and its Myplotlib entry module
+  serve        Serve a web project with cross-origin isolation
 
 Build options:
   --manifest-path <PATH>    Application Cargo.toml (default: Cargo.toml)
   --out-dir <PATH>          Output directory (default: dist)
   --release                 Build optimized Wasm
   --locked                  Require Cargo.lock to remain unchanged
+  -h, --help                Print help
+
+Serve options:
+  --dir <PATH>              Web root (default: current directory)
+  --host <IP>               Bind address (default: 127.0.0.1)
+  --port <PORT>             Port (default: 8080)
   -h, --help                Print help
 
 General options:
@@ -52,10 +63,28 @@ impl Default for BuildWeb {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Serve {
+    pub dir: PathBuf,
+    pub host: IpAddr,
+    pub port: u16,
+}
+
+impl Default for Serve {
+    fn default() -> Self {
+        Self {
+            dir: PathBuf::from("."),
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 8080,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Help,
     Version,
     BuildWeb(BuildWeb),
+    Serve(Serve),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +121,41 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
     }
     if matches!(command, "-V" | "--version") {
         return Ok(Action::Version);
+    }
+    if command == "serve" {
+        let mut config = Serve::default();
+        let mut index = 1;
+        while index < args.len() {
+            let argument = args[index]
+                .to_str()
+                .ok_or_else(|| Error::new("options must be valid UTF-8"))?;
+            match argument {
+                "--dir" => {
+                    index += 1;
+                    config.dir = option_value(&args, index, "--dir")?;
+                }
+                "--host" => {
+                    index += 1;
+                    let value = text_option_value(&args, index, "--host")?;
+                    config.host = value.parse().map_err(|_| {
+                        Error::new(format!("--host requires an IP address, got: {value}"))
+                    })?;
+                }
+                "--port" => {
+                    index += 1;
+                    let value = text_option_value(&args, index, "--port")?;
+                    config.port = value.parse().map_err(|_| {
+                        Error::new(format!(
+                            "--port requires a number from 0 to 65535, got: {value}"
+                        ))
+                    })?;
+                }
+                "-h" | "--help" => return Ok(Action::Help),
+                unknown => return Err(Error::new(format!("unknown serve option: {unknown}"))),
+            }
+            index += 1;
+        }
+        return Ok(Action::Serve(config));
     }
     if command != "build-web" {
         return Err(Error::new(format!("unknown command: {command}")));
@@ -130,6 +194,18 @@ fn option_value(args: &[OsString], index: usize, option: &str) -> Result<PathBuf
         .ok_or_else(|| Error::new(format!("{option} requires a path")))
 }
 
+fn text_option_value<'a>(
+    args: &'a [OsString],
+    index: usize,
+    option: &str,
+) -> Result<&'a str, Error> {
+    args.get(index)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| Error::new(format!("{option} requires a value")))?
+        .to_str()
+        .ok_or_else(|| Error::new(format!("{option} must be valid UTF-8")))
+}
+
 pub fn run(action: Action) -> Result<(), Error> {
     match action {
         Action::Help => {
@@ -141,6 +217,7 @@ pub fn run(action: Action) -> Result<(), Error> {
             Ok(())
         }
         Action::BuildWeb(config) => build_web(config),
+        Action::Serve(config) => server::serve(config),
     }
 }
 
@@ -336,6 +413,40 @@ mod tests {
             Action::Version
         );
         assert_eq!(version_line(), format!("cargo-myplotlib {VERSION}"));
+    }
+
+    #[test]
+    fn parses_serve_options_with_or_without_cargo_prefix() {
+        assert_eq!(
+            parse_args(arguments(&["serve"])).unwrap(),
+            Action::Serve(Serve::default())
+        );
+
+        let expected = Action::Serve(Serve {
+            dir: PathBuf::from("public"),
+            host: "0.0.0.0".parse().unwrap(),
+            port: 3000,
+        });
+        let options = [
+            "serve", "--dir", "public", "--host", "0.0.0.0", "--port", "3000",
+        ];
+        assert_eq!(parse_args(arguments(&options)).unwrap(), expected);
+
+        let mut prefixed = vec!["myplotlib"];
+        prefixed.extend(options);
+        assert_eq!(parse_args(arguments(&prefixed)).unwrap(), expected);
+    }
+
+    #[test]
+    fn rejects_invalid_serve_options() {
+        let error = parse_args(arguments(&["serve", "--host", "localhost"])).unwrap_err();
+        assert!(error.to_string().contains("requires an IP address"));
+
+        let error = parse_args(arguments(&["serve", "--port", "65536"])).unwrap_err();
+        assert!(error.to_string().contains("requires a number"));
+
+        let error = parse_args(arguments(&["serve", "--dir"])).unwrap_err();
+        assert!(error.to_string().contains("requires a path"));
     }
 
     #[test]
