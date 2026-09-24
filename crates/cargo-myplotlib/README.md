@@ -81,4 +81,6 @@ from another device over a LAN address.
 This command expects `wasm-pack` to be installed. Its loader initializes Rayon
 when the generated bindings export `initThreadPool`. It does not generate
 standalone HTML; `serve` hosts the application-provided page alongside the
-generated package.
+generated package. Generated Wasm dependencies use content-versioned URLs so
+the development server can reuse them across worker contexts without serving
+stale assets after a rebuild.

@@ -87,6 +87,7 @@ fn response_for(method: &Method, url: &str, root: &Path) -> ResponseBox {
             let mime = mime_guess::from_path(&path).first_or_octet_stream();
             with_common_headers(
                 Response::from_file(file).with_header(header("Content-Type", mime.essence_str())),
+                cache_control(url),
             )
             .boxed()
         }
@@ -105,20 +106,38 @@ fn text_response(status: StatusCode, body: &str) -> ResponseBox {
         Response::from_string(body)
             .with_status_code(status)
             .with_header(header("Content-Type", "text/plain; charset=utf-8")),
+        "no-store",
     )
     .boxed()
 }
 
-fn with_common_headers<R: io::Read>(mut response: Response<R>) -> Response<R> {
+fn with_common_headers<R: io::Read>(mut response: Response<R>, cache_control: &str) -> Response<R> {
     for (name, value) in [
         ("Cross-Origin-Opener-Policy", "same-origin"),
         ("Cross-Origin-Embedder-Policy", "require-corp"),
         ("Cross-Origin-Resource-Policy", "same-origin"),
-        ("Cache-Control", "no-store"),
+        ("Cache-Control", cache_control),
     ] {
         response.add_header(header(name, value));
     }
     response
+}
+
+fn cache_control(url: &str) -> &'static str {
+    let versioned = url
+        .split_once('?')
+        .map(|(_, query)| {
+            query
+                .split('&')
+                .filter_map(|field| field.split_once('='))
+                .any(|(name, value)| name == "v" && !value.is_empty())
+        })
+        .unwrap_or(false);
+    if versioned {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    }
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -301,6 +320,23 @@ mod tests {
             );
             assert_eq!(header_value(&headers, "Cache-Control"), Some("no-store"));
         }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn caches_only_versioned_assets() {
+        let root = temporary_directory();
+        fs::write(root.join("app.js"), "ok").unwrap();
+
+        let (_, headers, _) = response(Method::Get, "/app.js", &root);
+        assert_eq!(header_value(&headers, "Cache-Control"), Some("no-store"));
+
+        let (_, headers, _) = response(Method::Get, "/app.js?v=1234", &root);
+        assert_eq!(
+            header_value(&headers, "Cache-Control"),
+            Some("public, max-age=31536000, immutable")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

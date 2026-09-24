@@ -11,6 +11,7 @@ mod threaded;
 
 const LOADER_JS: &str = include_str!("../../../web/loader.js");
 const APP_JS: &str = include_str!("../../../web/app.js");
+const RAYON_WORKER_JS: &str = include_str!("../../../web/rayon-worker.js");
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const WEB_PACKAGE_VERSION: u32 = 1;
@@ -281,10 +282,14 @@ pub fn build_web(config: BuildWeb) -> Result<(), Error> {
         run_wasm_pack(&program, &arguments)?;
     }
     validate_wasm_pack_output(&out_dir)?;
-    if config.wasm_threads {
+    let rayon_worker = if config.wasm_threads {
         threaded::validate_wasm(&out_dir.join("bindings_bg.wasm"), config.wasm_max_memory)?;
-    }
-    write_web_assets(&out_dir)?;
+        Some(write_rayon_worker(&out_dir)?)
+    } else {
+        None
+    };
+    let asset_version = version_wasm_assets(&out_dir, rayon_worker.as_deref())?;
+    write_web_assets(&out_dir, &asset_version)?;
 
     println!("Myplotlib web package written to {}", out_dir.display());
     Ok(())
@@ -362,7 +367,111 @@ fn validate_wasm_pack_output(out_dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn write_web_assets(out_dir: &Path) -> Result<(), Error> {
+fn write_rayon_worker(out_dir: &Path) -> Result<PathBuf, Error> {
+    let snippets = out_dir.join("snippets");
+    let entries = fs::read_dir(&snippets).map_err(|error| {
+        Error::new(format!(
+            "threaded build did not create {}: {error}",
+            snippets.display()
+        ))
+    })?;
+    let mut workers = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::new(format!(
+                "failed to inspect threaded snippets in {}: {error}",
+                snippets.display()
+            ))
+        })?;
+        let path = entry.path().join("src/workerHelpers.no-bundler.js");
+        if path.is_file() {
+            workers.push(path);
+        }
+    }
+
+    let [worker] = workers.as_slice() else {
+        return Err(Error::new(format!(
+            "threaded build expected exactly one wasm-bindgen-rayon no-bundler worker helper in {}; found {}",
+            snippets.display(),
+            workers.len()
+        )));
+    };
+    write_asset(worker, RAYON_WORKER_JS)?;
+    Ok(worker.to_owned())
+}
+
+fn version_wasm_assets(out_dir: &Path, rayon_worker: Option<&Path>) -> Result<String, Error> {
+    let bindings_path = out_dir.join("bindings.js");
+    let wasm_path = out_dir.join("bindings_bg.wasm");
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for path in [
+        Some(bindings_path.as_path()),
+        Some(wasm_path.as_path()),
+        rayon_worker,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for byte in fs::read(path)
+            .map_err(|error| Error::new(format!("failed to read {}: {error}", path.display())))?
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    let version = format!("{hash:016x}");
+
+    let mut bindings = fs::read_to_string(&bindings_path).map_err(|error| {
+        Error::new(format!(
+            "failed to read {}: {error}",
+            bindings_path.display()
+        ))
+    })?;
+    bindings = replace_once(
+        &bindings,
+        "new URL('bindings_bg.wasm', import.meta.url)",
+        &format!("new URL('bindings_bg.wasm?v={version}', import.meta.url)"),
+        &bindings_path,
+    )?;
+    if let Some(worker) = rayon_worker {
+        let relative = worker.strip_prefix(out_dir).map_err(|_| {
+            Error::new(format!(
+                "Rayon worker {} is outside output directory {}",
+                worker.display(),
+                out_dir.display()
+            ))
+        })?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        bindings = replace_once(
+            &bindings,
+            &format!("'./{relative}'"),
+            &format!("'./{relative}?v={version}'"),
+            &bindings_path,
+        )?;
+    }
+    write_asset(&bindings_path, &bindings)?;
+    Ok(version)
+}
+
+fn replace_once(contents: &str, old: &str, new: &str, path: &Path) -> Result<String, Error> {
+    let Some(index) = contents.find(old) else {
+        return Err(Error::new(format!(
+            "generated JavaScript in {} did not contain {old:?}",
+            path.display()
+        )));
+    };
+    if contents[index + old.len()..].contains(old) {
+        return Err(Error::new(format!(
+            "generated JavaScript in {} contained {old:?} more than once",
+            path.display()
+        )));
+    }
+    let mut result = contents.to_owned();
+    result.replace_range(index..index + old.len(), new);
+    Ok(result)
+}
+
+fn write_web_assets(out_dir: &Path, asset_version: &str) -> Result<(), Error> {
     fs::create_dir_all(out_dir).map_err(|error| {
         Error::new(format!(
             "failed to create output directory {}: {error}",
@@ -378,8 +487,12 @@ fn write_web_assets(out_dir: &Path) -> Result<(), Error> {
         &format!(
             "{}export const cargoMyplotlibVersion = {VERSION:?};\n\
              export const myplotlibWebPackageVersion = {WEB_PACKAGE_VERSION};\n\n\
-             {APP_JS}",
+             {}",
             generated_notice(),
+            APP_JS.replace(
+                "new URL(\"./bindings.js\", import.meta.url)",
+                &format!("new URL(\"./bindings.js?v={asset_version}\", import.meta.url)")
+            ),
         ),
     )?;
     Ok(())
@@ -594,7 +707,7 @@ mod tests {
     #[test]
     fn writes_the_public_entry_and_private_loader() {
         let directory = temporary_directory();
-        write_web_assets(&directory).unwrap();
+        write_web_assets(&directory, "test-version").unwrap();
 
         let app = fs::read_to_string(directory.join("app.js")).unwrap();
         let loader = fs::read_to_string(directory.join("myplotlib-loader.js")).unwrap();
@@ -607,9 +720,48 @@ mod tests {
             "export const myplotlibWebPackageVersion = {WEB_PACKAGE_VERSION};"
         )));
         assert!(app.contains("export function mount"));
-        assert!(app.contains("./bindings.js"));
+        assert!(app.contains("./bindings.js?v=test-version"));
         assert!(loader.starts_with(&notice));
         assert!(loader.contains("export function mountApp"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn replaces_the_no_bundler_rayon_worker() {
+        let directory = temporary_directory();
+        let worker =
+            directory.join("snippets/wasm-bindgen-rayon-test/src/workerHelpers.no-bundler.js");
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::write(&worker, "upstream helper").unwrap();
+
+        write_rayon_worker(&directory).unwrap();
+
+        let worker = fs::read_to_string(worker).unwrap();
+        assert_eq!(worker, RAYON_WORKER_JS);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn adds_content_versions_to_wasm_assets() {
+        let directory = temporary_directory();
+        fs::write(
+            directory.join("bindings.js"),
+            "import './snippets/wasm-bindgen-rayon-test/src/workerHelpers.no-bundler.js';\nconst wasm = new URL('bindings_bg.wasm', import.meta.url);\n",
+        )
+        .unwrap();
+        fs::write(directory.join("bindings_bg.wasm"), b"\0asm").unwrap();
+        let worker =
+            directory.join("snippets/wasm-bindgen-rayon-test/src/workerHelpers.no-bundler.js");
+        fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        fs::write(&worker, RAYON_WORKER_JS).unwrap();
+
+        let version = version_wasm_assets(&directory, Some(&worker)).unwrap();
+
+        let bindings = fs::read_to_string(directory.join("bindings.js")).unwrap();
+        assert!(bindings.contains(&format!("workerHelpers.no-bundler.js?v={version}")));
+        assert!(bindings.contains(&format!("bindings_bg.wasm?v={version}")));
 
         fs::remove_dir_all(directory).unwrap();
     }
