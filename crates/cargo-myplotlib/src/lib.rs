@@ -12,6 +12,10 @@ mod threaded;
 const LOADER_JS: &str = include_str!("../../../web/loader.js");
 const APP_JS: &str = include_str!("../../../web/app.js");
 const RAYON_WORKER_JS: &str = include_str!("../../../web/rayon-worker.js");
+const APACHE_2_0_LICENSE: &str = include_str!("../../../LICENSES/Apache-2.0.txt");
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+const WASM_BINDGEN_RAYON_1_3_0_WORKER_FINGERPRINT: u64 = 0x85de_7534_7bfe_359f;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const WEB_PACKAGE_VERSION: u32 = 1;
@@ -396,14 +400,72 @@ fn write_rayon_worker(out_dir: &Path) -> Result<PathBuf, Error> {
             workers.len()
         )));
     };
-    write_asset(worker, RAYON_WORKER_JS)?;
+    replace_rayon_worker(out_dir, worker, WASM_BINDGEN_RAYON_1_3_0_WORKER_FINGERPRINT)?;
     Ok(worker.to_owned())
+}
+
+fn replace_rayon_worker(
+    out_dir: &Path,
+    worker: &Path,
+    expected_fingerprint: u64,
+) -> Result<(), Error> {
+    let upstream = fs::read(worker)
+        .map_err(|error| Error::new(format!("failed to read {}: {error}", worker.display())))?;
+    let actual_fingerprint = extend_fingerprint(FNV_OFFSET_BASIS, &upstream);
+    if actual_fingerprint != expected_fingerprint {
+        return Err(Error::new(format!(
+            "unsupported wasm-bindgen-rayon worker helper in {}; expected the 1.3.0 helper fingerprint {expected_fingerprint:016x}, found {actual_fingerprint:016x}",
+            worker.display()
+        )));
+    }
+    write_asset(worker, RAYON_WORKER_JS)?;
+    write_rayon_licenses(out_dir, worker)
+}
+
+fn write_rayon_licenses(out_dir: &Path, worker: &Path) -> Result<(), Error> {
+    let relative_worker = worker.strip_prefix(out_dir).map_err(|_| {
+        Error::new(format!(
+            "Rayon worker {} is outside output directory {}",
+            worker.display(),
+            out_dir.display()
+        ))
+    })?;
+    let relative_worker = relative_worker.to_string_lossy().replace('\\', "/");
+    let licenses = out_dir.join("LICENSES");
+    fs::create_dir_all(&licenses).map_err(|error| {
+        Error::new(format!(
+            "failed to create license directory {}: {error}",
+            licenses.display()
+        ))
+    })?;
+    write_asset(&licenses.join("Apache-2.0.txt"), APACHE_2_0_LICENSE)?;
+    write_asset(
+        &licenses.join("README.md"),
+        &format!(
+            "# Third-party licenses\n\n\
+             `{relative_worker}` is derived from `src/workerHelpers.no-bundler.js` in \
+             [wasm-bindgen-rayon 1.3.0](https://github.com/RReverser/wasm-bindgen-rayon).\n\n\
+             Copyright 2022 Google Inc. All Rights Reserved.\n\n\
+             This material is licensed under the Apache License, Version 2.0. The complete \
+             license text is in [`Apache-2.0.txt`](Apache-2.0.txt). This notice identifies \
+             only the worker above and makes no licensing statement about any other file \
+             in this generated web package.\n",
+        ),
+    )
+}
+
+fn extend_fingerprint(mut fingerprint: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        fingerprint ^= u64::from(byte);
+        fingerprint = fingerprint.wrapping_mul(FNV_PRIME);
+    }
+    fingerprint
 }
 
 fn version_wasm_assets(out_dir: &Path, rayon_worker: Option<&Path>) -> Result<String, Error> {
     let bindings_path = out_dir.join("bindings.js");
     let wasm_path = out_dir.join("bindings_bg.wasm");
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut hash = FNV_OFFSET_BASIS;
     for path in [
         Some(bindings_path.as_path()),
         Some(wasm_path.as_path()),
@@ -412,12 +474,9 @@ fn version_wasm_assets(out_dir: &Path, rayon_worker: Option<&Path>) -> Result<St
     .into_iter()
     .flatten()
     {
-        for byte in fs::read(path)
-            .map_err(|error| Error::new(format!("failed to read {}: {error}", path.display())))?
-        {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        let bytes = fs::read(path)
+            .map_err(|error| Error::new(format!("failed to read {}: {error}", path.display())))?;
+        hash = extend_fingerprint(hash, &bytes);
     }
     let version = format!("{hash:016x}");
 
@@ -733,12 +792,50 @@ mod tests {
         let worker =
             directory.join("snippets/wasm-bindgen-rayon-test/src/workerHelpers.no-bundler.js");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
-        fs::write(&worker, "upstream helper").unwrap();
+        let upstream = b"supported upstream helper";
+        fs::write(&worker, upstream).unwrap();
 
-        write_rayon_worker(&directory).unwrap();
+        replace_rayon_worker(
+            &directory,
+            &worker,
+            extend_fingerprint(FNV_OFFSET_BASIS, upstream),
+        )
+        .unwrap();
 
         let worker = fs::read_to_string(worker).unwrap();
         assert_eq!(worker, RAYON_WORKER_JS);
+        assert_eq!(
+            fs::read_to_string(directory.join("LICENSES/Apache-2.0.txt")).unwrap(),
+            APACHE_2_0_LICENSE
+        );
+        let license_readme = fs::read_to_string(directory.join("LICENSES/README.md")).unwrap();
+        assert!(
+            license_readme
+                .contains("snippets/wasm-bindgen-rayon-test/src/workerHelpers.no-bundler.js")
+        );
+        assert!(license_readme.contains("makes no licensing statement about any other file"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_an_unrecognized_rayon_worker() {
+        let directory = temporary_directory();
+        let worker = directory.join("workerHelpers.no-bundler.js");
+        fs::write(&worker, "changed upstream helper").unwrap();
+
+        let error = replace_rayon_worker(
+            &directory,
+            &worker,
+            WASM_BINDGEN_RAYON_1_3_0_WORKER_FINGERPRINT,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported wasm-bindgen-rayon"));
+        assert_eq!(
+            fs::read_to_string(&worker).unwrap(),
+            "changed upstream helper"
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }

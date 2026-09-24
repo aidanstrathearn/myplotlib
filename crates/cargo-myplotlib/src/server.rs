@@ -124,20 +124,29 @@ fn with_common_headers<R: io::Read>(mut response: Response<R>, cache_control: &s
 }
 
 fn cache_control(url: &str) -> &'static str {
-    let versioned = url
-        .split_once('?')
-        .map(|(_, query)| {
-            query
+    let versioned = url.split_once('?').is_some_and(|(path, query)| {
+        is_generated_wasm_asset(path)
+            && query
                 .split('&')
                 .filter_map(|field| field.split_once('='))
-                .any(|(name, value)| name == "v" && !value.is_empty())
-        })
-        .unwrap_or(false);
+                .any(|(name, value)| name == "v" && is_content_version(value))
+    });
     if versioned {
         "public, max-age=31536000, immutable"
     } else {
         "no-store"
     }
+}
+
+fn is_generated_wasm_asset(path: &str) -> bool {
+    matches!(
+        path.rsplit('/').next(),
+        Some("bindings.js" | "bindings_bg.wasm" | "workerHelpers.no-bundler.js")
+    )
+}
+
+fn is_content_version(value: &str) -> bool {
+    value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -328,11 +337,27 @@ mod tests {
     fn caches_only_versioned_assets() {
         let root = temporary_directory();
         fs::write(root.join("app.js"), "ok").unwrap();
+        fs::write(root.join("bindings.js"), "ok").unwrap();
 
-        let (_, headers, _) = response(Method::Get, "/app.js", &root);
-        assert_eq!(header_value(&headers, "Cache-Control"), Some("no-store"));
+        for url in [
+            "/app.js",
+            "/app.js?v=0123456789abcdef",
+            "/bindings.js?v=1234",
+            "/bindings.js?v=0123456789abcdeg",
+        ] {
+            let (_, headers, _) = response(Method::Get, url, &root);
+            assert_eq!(header_value(&headers, "Cache-Control"), Some("no-store"));
+        }
 
-        let (_, headers, _) = response(Method::Get, "/app.js?v=1234", &root);
+        for url in [
+            "/bindings.js?v=0123456789abcdef",
+            "/bindings_bg.wasm?v=0123456789abcdef",
+            "/snippets/rayon/src/workerHelpers.no-bundler.js?v=0123456789abcdef",
+        ] {
+            assert_eq!(cache_control(url), "public, max-age=31536000, immutable");
+        }
+
+        let (_, headers, _) = response(Method::Get, "/bindings.js?v=0123456789abcdef", &root);
         assert_eq!(
             header_value(&headers, "Cache-Control"),
             Some("public, max-age=31536000, immutable")
