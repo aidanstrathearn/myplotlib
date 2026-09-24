@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod server;
+mod threaded;
 
 const LOADER_JS: &str = include_str!("../../../web/loader.js");
 const APP_JS: &str = include_str!("../../../web/app.js");
@@ -31,6 +32,8 @@ Build options:
   --out-dir <PATH>          Output directory (default: dist)
   --release                 Build optimized Wasm
   --locked                  Require Cargo.lock to remain unchanged
+  --wasm-threads            Build with shared-memory WebAssembly threads
+  --wasm-max-memory <BYTES> Shared-memory maximum (default: 1073741824)
   -h, --help                Print help
 
 Serve options:
@@ -49,6 +52,8 @@ pub struct BuildWeb {
     pub out_dir: PathBuf,
     pub release: bool,
     pub locked: bool,
+    pub wasm_threads: bool,
+    pub wasm_max_memory: u64,
 }
 
 impl Default for BuildWeb {
@@ -58,6 +63,8 @@ impl Default for BuildWeb {
             out_dir: PathBuf::from("dist"),
             release: false,
             locked: false,
+            wasm_threads: false,
+            wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
         }
     }
 }
@@ -162,6 +169,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
     }
 
     let mut config = BuildWeb::default();
+    let mut wasm_max_memory_set = false;
     let mut index = 1;
     while index < args.len() {
         let argument = args[index]
@@ -178,10 +186,28 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
             }
             "--release" => config.release = true,
             "--locked" => config.locked = true,
+            "--wasm-threads" => config.wasm_threads = true,
+            "--wasm-max-memory" => {
+                index += 1;
+                let value = text_option_value(&args, index, "--wasm-max-memory")?;
+                config.wasm_max_memory = value.parse().map_err(|_| {
+                    Error::new(format!(
+                        "--wasm-max-memory requires a number of bytes, got: {value}"
+                    ))
+                })?;
+                wasm_max_memory_set = true;
+            }
             "-h" | "--help" => return Ok(Action::Help),
             unknown => return Err(Error::new(format!("unknown build-web option: {unknown}"))),
         }
         index += 1;
+    }
+
+    if wasm_max_memory_set && !config.wasm_threads {
+        return Err(Error::new("--wasm-max-memory requires --wasm-threads"));
+    }
+    if config.wasm_threads {
+        threaded::validate_max_memory(config.wasm_max_memory)?;
     }
 
     Ok(Action::BuildWeb(config))
@@ -248,8 +274,16 @@ pub fn build_web(config: BuildWeb) -> Result<(), Error> {
 
     let arguments = wasm_pack_arguments(crate_directory, &out_dir, &config);
     let program = env::var_os("MYPLOTLIB_WASM_PACK").unwrap_or_else(|| "wasm-pack".into());
-    run_wasm_pack(&program, &arguments)?;
+    if config.wasm_threads {
+        threaded::ensure_prerequisites()?;
+        threaded::run_wasm_pack(&program, &arguments)?;
+    } else {
+        run_wasm_pack(&program, &arguments)?;
+    }
     validate_wasm_pack_output(&out_dir)?;
+    if config.wasm_threads {
+        threaded::validate_wasm(&out_dir.join("bindings_bg.wasm"), config.wasm_max_memory)?;
+    }
     write_web_assets(&out_dir)?;
 
     println!("Myplotlib web package written to {}", out_dir.display());
@@ -284,9 +318,16 @@ pub fn wasm_pack_arguments(
     if config.release {
         arguments.push(OsString::from("--release"));
     }
+    let mut cargo_arguments = Vec::new();
+    if config.wasm_threads {
+        cargo_arguments.extend(threaded::cargo_arguments(config.wasm_max_memory));
+    }
     if config.locked {
+        cargo_arguments.push(OsString::from("--locked"));
+    }
+    if !cargo_arguments.is_empty() {
         arguments.push(OsString::from("--"));
-        arguments.push(OsString::from("--locked"));
+        arguments.extend(cargo_arguments);
     }
     arguments
 }
@@ -384,6 +425,8 @@ mod tests {
             out_dir: PathBuf::from("public/app"),
             release: true,
             locked: true,
+            wasm_threads: false,
+            wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
         });
         let options = [
             "build-web",
@@ -456,6 +499,35 @@ mod tests {
 
         let error = parse_args(arguments(&["build-web", "--out-dir"])).unwrap_err();
         assert!(error.to_string().contains("requires a path"));
+
+        let error =
+            parse_args(arguments(&["build-web", "--wasm-max-memory", "1073741824"])).unwrap_err();
+        assert!(error.to_string().contains("requires --wasm-threads"));
+
+        let error = parse_args(arguments(&[
+            "build-web",
+            "--wasm-threads",
+            "--wasm-max-memory",
+            "123",
+        ]))
+        .unwrap_err();
+        assert!(error.to_string().contains("multiple of 65536"));
+    }
+
+    #[test]
+    fn parses_threaded_build_options() {
+        let action = parse_args(arguments(&[
+            "build-web",
+            "--wasm-threads",
+            "--wasm-max-memory",
+            "2147483648",
+        ]))
+        .unwrap();
+        let Action::BuildWeb(config) = action else {
+            panic!("expected a build action");
+        };
+        assert!(config.wasm_threads);
+        assert_eq!(config.wasm_max_memory, 2_147_483_648);
     }
 
     #[test]
@@ -465,6 +537,8 @@ mod tests {
             out_dir: PathBuf::from("pkg"),
             release: true,
             locked: true,
+            wasm_threads: false,
+            wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
         };
         let actual = wasm_pack_arguments(Path::new("/work/app"), Path::new("/work/pkg"), &config);
         let expected = arguments(&[
@@ -484,6 +558,26 @@ mod tests {
         ]);
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn appends_threaded_cargo_options_after_wasm_pack_options() {
+        let config = BuildWeb {
+            wasm_threads: true,
+            locked: true,
+            ..BuildWeb::default()
+        };
+        let actual = wasm_pack_arguments(Path::new("/work/app"), Path::new("/work/pkg"), &config);
+        let separator = actual.iter().position(|value| value == "--").unwrap();
+        assert_eq!(actual[separator + 1], "--config");
+        assert!(
+            actual[separator + 2]
+                .to_string_lossy()
+                .contains("link-arg=--shared-memory")
+        );
+        assert_eq!(actual[separator + 3], "-Z");
+        assert_eq!(actual[separator + 4], "build-std=panic_abort,std");
+        assert_eq!(actual[separator + 5], "--locked");
     }
 
     #[test]

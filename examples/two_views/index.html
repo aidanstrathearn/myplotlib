@@ -22,9 +22,25 @@
         padding: 1.5rem;
       }
 
+      .page-header {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+      }
+
       h1 {
-        margin: 0 0 1.5rem;
+        margin: 0;
         font-size: 1.5rem;
+      }
+
+      .thread-control {
+        margin-left: auto;
+        font-size: 0.875rem;
+      }
+
+      .thread-control select {
+        font: inherit;
       }
 
       .apps {
@@ -71,7 +87,19 @@
   </head>
   <body>
     <main>
-      <h1>Two independently mounted Myplotlib applications</h1>
+      <div class="page-header">
+        <h1>Two independently mounted Myplotlib applications</h1>
+        <label class="thread-control">
+          Threads
+          <select id="thread-count">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="4">4</option>
+            <option value="8">8</option>
+            <option value="12">12</option>
+          </select>
+        </label>
+      </div>
       <div class="apps">
         <section>
           <h2>Instance one</h2>
@@ -86,21 +114,38 @@
     </main>
 
     <script type="module">
-      import { mount } from "./pkg/app.js";
+      import { mount } from "./dist/app.js";
       const canvas1 = document.querySelector("[data-myplotlib-app]");
       const canvas2 = document.querySelector("[data-myplotlib-app2]");
-      mount(canvas1);
-      mount(canvas2);
+      const allowedThreads = new Set(["1", "2", "4", "8", "12"]);
+      const threadCount = document.querySelector("#thread-count");
+      const requestedThreads = new URLSearchParams(location.search).get(
+        "threads",
+      );
+      const availableThreads = Math.max(1, navigator.hardwareConcurrency ?? 4);
+      const defaultThreads = [8, 4, 2, 1].find(
+        (candidate) => candidate <= availableThreads,
+      );
+      const threads = allowedThreads.has(requestedThreads)
+        ? Number(requestedThreads)
+        : defaultThreads;
 
-      // const canvases = document.querySelectorAll("[data-myplotlib-app]");
-      // try {
-      //   await Promise.all(
-      //     Array.from(canvases, (canvas) => mount(canvas)),
-      //   );
-      // } catch (error) {
-      //   document.querySelector("#error").textContent = String(error);
-      //   throw error;
-      // }
+      threadCount.value = String(threads);
+      threadCount.addEventListener("change", () => {
+        const url = new URL(location.href);
+        url.searchParams.set("threads", threadCount.value);
+        location.replace(url);
+      });
+
+      try {
+        await Promise.all([
+          mount(canvas1, { threads }),
+          mount(canvas2, { threads }),
+        ]);
+      } catch (error) {
+        document.querySelector("#error").textContent = String(error);
+        throw error;
+      }
     </script>
   </body>
 </html>
