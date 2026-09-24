@@ -348,6 +348,47 @@ fn slider_app_renders_caches_switches_views_and_resets() {
 }
 
 #[test]
+fn app_save_button_requests_a_screenshot() {
+    use eframe::App as _;
+
+    const VIEWS: &[ViewOption<Params>] = &[ViewOption::new("Signal", success, controls)];
+    let ctx = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut draw = |time, events| ctx.run(input(time, events), |ctx| app.update(ctx, &mut frame));
+
+    draw(0.0, vec![]);
+    let output = draw(0.1, vec![]);
+    let save_pos = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "Save" => {
+                Some(text.pos + egui::vec2(3.0, 3.0))
+            }
+            _ => None,
+        })
+        .expect("the Save button should be visible");
+
+    draw(
+        0.2,
+        vec![
+            egui::Event::PointerMoved(save_pos),
+            pointer_button(save_pos, true),
+        ],
+    );
+    let output = draw(0.3, vec![pointer_button(save_pos, false)]);
+
+    assert!(output.viewport_output.values().any(|viewport| {
+        viewport
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::Screenshot(_)))
+    }));
+}
+
+#[test]
 fn standalone_app_switches_views_with_arrow_keys() {
     use eframe::App as _;
 

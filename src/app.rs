@@ -1,4 +1,4 @@
-use crate::{Plotter, SliderGrid};
+use crate::{Plotter, SliderGrid, save};
 use eframe::egui;
 use eframe::egui::Ui;
 use std::time::Duration;
@@ -167,36 +167,55 @@ where
         &self.definition.views[self.selected_view]
     }
 
-    fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool) {
-        egui::containers::Sides::new().shrink_left().show(
-            ui,
-            |ui| {
-                ui.heading("View: ");
-                ui.scope(|ui| {
-                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+    fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool, bool) {
+        let can_save = matches!(self.cached_plotter, Some(Ok(_)));
+        let save_status_id = Self::save_status_id(ui);
+        let (view_changed, (reset_requested, save_requested)) =
+            egui::containers::Sides::new().shrink_left().show(
+                ui,
+                |ui| {
+                    ui.heading("View: ");
+                    ui.scope(|ui| {
+                        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
-                    egui::ScrollArea::horizontal()
-                        .id_salt("plot-app-view-options")
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                view_selector(&mut self.selected_view, self.definition.views, ui)
+                        egui::ScrollArea::horizontal()
+                            .id_salt("plot-app-view-options")
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    view_selector(
+                                        &mut self.selected_view,
+                                        self.definition.views,
+                                        ui,
+                                    )
+                                })
+                                .inner
                             })
                             .inner
-                        })
-                        .inner
-                })
-                .inner
-            },
-            |ui| {
-                let reset_requested = Self::reset_button(ui);
-                if let Some(compute_time) = self.compute_time {
-                    let milliseconds = compute_time.as_secs_f64() * 1_000.0;
-                    ui.label(format!("Compute: {milliseconds:.3} ms"));
-                }
-                reset_requested
-            },
-        )
+                    })
+                    .inner
+                },
+                |ui| {
+                    let reset_requested = Self::reset_button(ui);
+                    let save_requested = Self::save_button(ui, can_save, save_status_id);
+                    if let Some(compute_time) = self.compute_time {
+                        let milliseconds = compute_time.as_secs_f64() * 1_000.0;
+                        ui.label(format!("Compute: {milliseconds:.3} ms"));
+                    }
+                    if let Some(save::SaveStatus::Error(error)) =
+                        save::status(ui.ctx(), save_status_id)
+                    {
+                        ui.colored_label(ui.visuals().error_fg_color, "Save failed")
+                            .on_hover_text(error);
+                    }
+                    (reset_requested, save_requested)
+                },
+            );
+        (view_changed, reset_requested, save_requested)
+    }
+
+    fn save_status_id(ui: &Ui) -> egui::Id {
+        ui.make_persistent_id("plot-app-save-status")
     }
 
     fn reset_button(ui: &mut Ui) -> bool {
@@ -212,6 +231,15 @@ where
             .clicked();
 
         button_clicked || shortcut_pressed
+    }
+
+    fn save_button(ui: &mut Ui, can_save: bool, status_id: egui::Id) -> bool {
+        let pending = matches!(
+            save::status(ui.ctx(), status_id),
+            Some(save::SaveStatus::Pending)
+        );
+        ui.add_enabled(can_save && !pending, egui::Button::new("Save"))
+            .clicked()
     }
 
     fn reset(&mut self, ui: &Ui) {
@@ -249,6 +277,37 @@ where
             None => {}
         }
     }
+
+    fn screenshot_filename(&self) -> String {
+        let title = filename_component(self.definition.title);
+        let view = filename_component(self.selected_option().title);
+        match (title.is_empty(), view.is_empty()) {
+            (false, false) if title != view => format!("{title}-{view}.png"),
+            (false, _) => format!("{title}.png"),
+            (_, false) => format!("{view}.png"),
+            _ => "plot.png".to_owned(),
+        }
+    }
+}
+
+fn filename_component(text: &str) -> String {
+    let mut component = String::new();
+    let mut separated = false;
+
+    for character in text.chars().flat_map(char::to_lowercase) {
+        if character.is_alphanumeric() {
+            component.push(character);
+            separated = false;
+        } else if !component.is_empty() && !separated {
+            component.push('-');
+            separated = true;
+        }
+    }
+
+    if component.ends_with('-') {
+        component.pop();
+    }
+    component
 }
 
 impl<P> App<P>
@@ -256,7 +315,7 @@ where
     P: Default + 'static,
 {
     pub(crate) fn show_ui(&mut self, ui: &mut Ui) {
-        let (view_changed, reset_requested) = self.draw_header(ui);
+        let (view_changed, reset_requested, save_requested) = self.draw_header(ui);
         let mut changed = view_changed;
         if reset_requested {
             self.reset(ui);
@@ -264,6 +323,10 @@ where
         }
 
         ui.separator();
+
+        // Everything below the app header belongs in the saved image: controls,
+        // plot titles and legends, the plot itself, and its summary panel.
+        let capture_rect = ui.available_rect_before_wrap();
 
         changed |= ui
             .scope(|ui| {
@@ -284,6 +347,15 @@ where
         ui.separator();
 
         self.draw_plot(ui);
+
+        if save_requested && matches!(self.cached_plotter, Some(Ok(_))) {
+            save::request(
+                ui.ctx(),
+                capture_rect,
+                self.screenshot_filename(),
+                Self::save_status_id(ui),
+            );
+        }
     }
 }
 
@@ -292,6 +364,7 @@ where
     P: Default + 'static,
 {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        save::handle_screenshot_events(ctx);
         egui::CentralPanel::default().show(ctx, |ui| self.show_ui(ui));
     }
 }

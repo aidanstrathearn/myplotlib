@@ -1,5 +1,5 @@
 use crate::figure::FigureApp;
-use crate::{App, AppDefinition, Figure, NativeResult};
+use crate::{App, AppDefinition, Figure, NativeResult, save};
 use eframe::egui;
 
 trait MenuContent {
@@ -175,6 +175,7 @@ impl AppMenu {
 
 impl eframe::App for AppMenu {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        save::handle_screenshot_events(ctx);
         self.draw(ctx);
     }
 }

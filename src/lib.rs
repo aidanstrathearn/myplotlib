@@ -4,6 +4,7 @@ mod appmenu;
 mod controls;
 mod figure;
 mod plotter;
+mod save;
 
 pub use app::{App, AppDefinition, AppError, AppResult, ControlsAction, PlotAction, ViewOption};
 #[cfg(not(target_arch = "wasm32"))]
