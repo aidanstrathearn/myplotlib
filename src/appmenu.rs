@@ -1,5 +1,9 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::NativeResult;
 use crate::figure::FigureApp;
-use crate::{App, AppDefinition, Figure, NativeResult, save};
+use crate::{App, AppDefinition, Figure, save};
+#[cfg(target_arch = "wasm32")]
+use crate::{WebHandle, WebResult};
 use eframe::egui;
 
 trait MenuContent {
@@ -44,7 +48,7 @@ impl MenuEntry {
     }
 }
 
-/// A native window with a selector for independently configured apps and figures.
+/// An application with a selector for independently configured apps and figures.
 /// Entries are created on first selection and retained when switching away.
 /// Unmodified up/down arrows select entries. Apps handle their own view navigation.
 /// Focused widgets retain their keyboard input.
@@ -85,6 +89,7 @@ impl AppMenu {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn run_native(self) -> NativeResult {
         let title = self.title.clone();
         let options = eframe::NativeOptions {
@@ -104,6 +109,12 @@ impl AppMenu {
                 Ok(Box::new(self))
             }),
         )
+    }
+
+    /// Mount the menu into a canvas supplied by the host page.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn mount_web(self, canvas: web_sys::HtmlCanvasElement) -> WebResult<WebHandle> {
+        crate::web::mount(canvas, self).await
     }
 
     fn navigate(&mut self, ctx: &egui::Context) -> bool {

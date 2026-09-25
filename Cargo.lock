@@ -1331,6 +1331,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "myplotlib-app-menu"
+version = "0.1.0"
+dependencies = [
+ "myplotlib",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "myplotlib-two-views"
 version = "0.1.0"
 dependencies = [

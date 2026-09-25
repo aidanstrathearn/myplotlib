@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::web::{self, WebHandle, WebResult};
 use crate::{Plotter, SliderGrid, save};
 use eframe::egui;
 use eframe::egui::Ui;
@@ -12,9 +14,6 @@ pub type ControlsAction<P> = for<'a> fn(&'a mut P) -> SliderGrid<'a>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type NativeResult<T = ()> = eframe::Result<T>;
-
-#[cfg(target_arch = "wasm32")]
-pub type WebResult<T = ()> = std::result::Result<T, wasm_bindgen::JsValue>;
 
 fn timed<T>(compute: impl FnOnce() -> T) -> (T, Duration) {
     let start = Instant::now();
@@ -402,25 +401,6 @@ where
     )
 }
 
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub struct WebHandle {
-    runner: eframe::WebRunner,
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen]
-impl WebHandle {
-    /// Shut down the application and release its browser resources.
-    ///
-    /// Web handles are finalized by JavaScript at an unspecified time, so
-    /// dropping a handle does not destroy its runner. Call this method when
-    /// the canvas is unmounted.
-    pub fn destroy(&self) {
-        self.runner.destroy();
-    }
-}
-
 /// Mount a new application instance into a canvas supplied by the host page.
 ///
 /// Each call creates independent application state. Retain the returned handle
@@ -438,14 +418,5 @@ pub async fn mount_web<P>(
 where
     P: Default + 'static,
 {
-    let runner = eframe::WebRunner::new();
-    runner
-        .start(
-            canvas,
-            eframe::WebOptions::default(),
-            Box::new(move |creation_context| Ok(Box::new(App::new(creation_context, definition)))),
-        )
-        .await?;
-
-    Ok(WebHandle { runner })
+    web::mount(canvas, App::from_definition(definition)).await
 }

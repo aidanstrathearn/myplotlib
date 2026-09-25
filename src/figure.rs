@@ -1,5 +1,4 @@
 use crate::Plotter;
-#[cfg(any(not(target_arch = "wasm32"), test))]
 use eframe::egui;
 
 pub struct Figure {
@@ -93,13 +92,11 @@ impl Figure {
     }
 }
 
-#[cfg(any(not(target_arch = "wasm32"), test))]
 pub(crate) struct FigureApp {
     figure: Figure,
     plot_rects: Vec<egui::Rect>,
 }
 
-#[cfg(any(not(target_arch = "wasm32"), test))]
 impl FigureApp {
     pub(crate) fn new(figure: Figure) -> Self {
         let plot_rects = vec![egui::Rect::NOTHING; figure.axes.len()];
@@ -107,6 +104,7 @@ impl FigureApp {
         Self { figure, plot_rects }
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), test))]
     fn draw(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| self.show_ui(ui));
     }
