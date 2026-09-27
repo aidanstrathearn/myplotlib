@@ -12,7 +12,10 @@ mod threaded;
 const LOADER_JS: &str = include_str!("../../../web/loader.js");
 const APP_JS: &str = include_str!("../../../web/app.js");
 const RAYON_WORKER_JS: &str = include_str!("../../../web/rayon-worker.js");
+const COI_SERVICE_WORKER_JS: &str = include_str!("../../../web/coi-serviceworker.js");
 const APACHE_2_0_LICENSE: &str = include_str!("../../../LICENSES/Apache-2.0.txt");
+const SITE_FILE_MARKER: &str = "cargo-myplotlib-generated-site";
+const SITE_FILES: [&str; 3] = ["index.html", "_headers", "coi-serviceworker.js"];
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const WASM_BINDGEN_RAYON_1_3_0_WORKER_FINGERPRINT: u64 = 0x85de_7534_7bfe_359f;
@@ -37,7 +40,9 @@ Build options:
   --out-dir <PATH>          Output directory (default: dist)
   --release                 Build optimized Wasm
   --locked                  Require Cargo.lock to remain unchanged
+  --site                    Generate a directly serveable site
   --wasm-threads            Build with shared-memory WebAssembly threads
+  --rayon-threads <COUNT>   Rayon workers for a threaded generated site
   --wasm-max-memory <BYTES> Shared-memory maximum (default: 1073741824)
   -h, --help                Print help
 
@@ -57,7 +62,9 @@ pub struct BuildWeb {
     pub out_dir: PathBuf,
     pub release: bool,
     pub locked: bool,
+    pub site: bool,
     pub wasm_threads: bool,
+    pub rayon_threads: Option<u32>,
     pub wasm_max_memory: u64,
 }
 
@@ -68,7 +75,9 @@ impl Default for BuildWeb {
             out_dir: PathBuf::from("dist"),
             release: false,
             locked: false,
+            site: false,
             wasm_threads: false,
+            rayon_threads: None,
             wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
         }
     }
@@ -191,7 +200,21 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
             }
             "--release" => config.release = true,
             "--locked" => config.locked = true,
+            "--site" => config.site = true,
             "--wasm-threads" => config.wasm_threads = true,
+            "--rayon-threads" => {
+                index += 1;
+                let value = text_option_value(&args, index, "--rayon-threads")?;
+                let threads = value.parse().map_err(|_| {
+                    Error::new(format!(
+                        "--rayon-threads requires a positive integer, got: {value}"
+                    ))
+                })?;
+                if threads == 0 {
+                    return Err(Error::new("--rayon-threads requires a positive integer"));
+                }
+                config.rayon_threads = Some(threads);
+            }
             "--wasm-max-memory" => {
                 index += 1;
                 let value = text_option_value(&args, index, "--wasm-max-memory")?;
@@ -210,6 +233,16 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
 
     if wasm_max_memory_set && !config.wasm_threads {
         return Err(Error::new("--wasm-max-memory requires --wasm-threads"));
+    }
+    if config.rayon_threads.is_some() && (!config.site || !config.wasm_threads) {
+        return Err(Error::new(
+            "--rayon-threads requires --site and --wasm-threads",
+        ));
+    }
+    if config.site && config.wasm_threads && config.rayon_threads.is_none() {
+        return Err(Error::new(
+            "a threaded --site build requires --rayon-threads <COUNT>",
+        ));
     }
     if config.wasm_threads {
         threaded::validate_max_memory(config.wasm_max_memory)?;
@@ -276,6 +309,9 @@ pub fn build_web(config: BuildWeb) -> Result<(), Error> {
         .parent()
         .ok_or_else(|| Error::new("manifest path has no parent directory"))?;
     let out_dir = absolute_path(&working_directory, &config.out_dir);
+    if config.site {
+        preflight_site_assets(&out_dir)?;
+    }
 
     let arguments = wasm_pack_arguments(crate_directory, &out_dir, &config);
     let program = env::var_os("MYPLOTLIB_WASM_PACK").unwrap_or_else(|| "wasm-pack".into());
@@ -294,8 +330,15 @@ pub fn build_web(config: BuildWeb) -> Result<(), Error> {
     };
     let asset_version = version_wasm_assets(&out_dir, rayon_worker.as_deref())?;
     write_web_assets(&out_dir, &asset_version)?;
+    if config.site {
+        write_site_assets(&out_dir, &asset_version, config.rayon_threads)?;
+    }
 
-    println!("Myplotlib web package written to {}", out_dir.display());
+    let output_kind = if config.site { "site" } else { "package" };
+    println!(
+        "Myplotlib web {output_kind} written to {}",
+        out_dir.display()
+    );
     Ok(())
 }
 
@@ -478,6 +521,9 @@ fn version_wasm_assets(out_dir: &Path, rayon_worker: Option<&Path>) -> Result<St
             .map_err(|error| Error::new(format!("failed to read {}: {error}", path.display())))?;
         hash = extend_fingerprint(hash, &bytes);
     }
+    hash = extend_fingerprint(hash, LOADER_JS.as_bytes());
+    hash = extend_fingerprint(hash, APP_JS.as_bytes());
+    hash = extend_fingerprint(hash, VERSION.as_bytes());
     let version = format!("{hash:016x}");
 
     let mut bindings = fs::read_to_string(&bindings_path).map_err(|error| {
@@ -530,6 +576,175 @@ fn replace_once(contents: &str, old: &str, new: &str, path: &Path) -> Result<Str
     Ok(result)
 }
 
+fn preflight_site_assets(out_dir: &Path) -> Result<(), Error> {
+    for file in SITE_FILES {
+        let path = out_dir.join(file);
+        match fs::read_to_string(&path) {
+            Ok(contents) if contents.contains(SITE_FILE_MARKER) => {}
+            Ok(_) => {
+                return Err(Error::new(format!(
+                    "refusing to overwrite site file not generated by cargo-myplotlib: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::new(format!(
+                    "failed to inspect site file {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_site_assets(
+    out_dir: &Path,
+    asset_version: &str,
+    rayon_threads: Option<u32>,
+) -> Result<(), Error> {
+    // Recheck after wasm-pack finishes so a file created during the build is
+    // never mistaken for one cargo-myplotlib owns.
+    preflight_site_assets(out_dir)?;
+    write_asset(
+        &out_dir.join("index.html"),
+        &site_html(asset_version, rayon_threads),
+    )?;
+
+    if rayon_threads.is_some() {
+        write_asset(&out_dir.join("_headers"), &site_headers())?;
+        write_asset(
+            &out_dir.join("coi-serviceworker.js"),
+            &format!(
+                "// {SITE_FILE_MARKER}\n{}{COI_SERVICE_WORKER_JS}",
+                generated_notice()
+            ),
+        )?;
+    } else {
+        for file in ["_headers", "coi-serviceworker.js"] {
+            remove_generated_site_asset(&out_dir.join(file))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_generated_site_asset(path: &Path) -> Result<(), Error> {
+    match fs::read_to_string(path) {
+        Ok(contents) if contents.contains(SITE_FILE_MARKER) => fs::remove_file(path)
+            .map_err(|error| Error::new(format!("failed to remove {}: {error}", path.display()))),
+        Ok(_) => Err(Error::new(format!(
+            "refusing to remove site file not generated by cargo-myplotlib: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::new(format!(
+            "failed to inspect site file {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn site_headers() -> String {
+    format!(
+        "# {SITE_FILE_MARKER}; generated by cargo-myplotlib {VERSION}; do not edit\n/*\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n  Cross-Origin-Resource-Policy: same-origin\n"
+    )
+}
+
+fn site_html(asset_version: &str, rayon_threads: Option<u32>) -> String {
+    const TEMPLATE: &str = r##"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Myplotlib application</title>
+{{SERVICE_WORKER}}    <style>
+      html, body, canvas { width: 100%; height: 100%; margin: 0; }
+      body { overflow: hidden; }
+      canvas { display: block; }
+      #error {
+        position: fixed;
+        inset: 1rem auto auto 1rem;
+        max-width: calc(100% - 4rem);
+        margin: 0;
+        padding: 0.75rem;
+        color: #a40000;
+        background: rgb(255 255 255 / 90%);
+        white-space: pre-wrap;
+      }
+      #error:empty { display: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+    <pre id="error" role="alert"></pre>
+    <script type="module">
+      import { mount } from "{{APP_MODULE}}";
+
+{{WORKER_CLEANUP}}      const canvas = document.querySelector("#app");
+      try {
+        {{MOUNT}}
+      } catch (error) {
+        document.querySelector("#error").textContent =
+          error instanceof Error ? error.message : String(error);
+        console.error(error);
+      }
+    </script>
+  </body>
+</html>
+"##;
+
+    const WORKER_CLEANUP: &str = r#"      if ("serviceWorker" in navigator) {
+        try {
+          const workerUrl = new URL("./coi-serviceworker.js", import.meta.url).href;
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          for (const registration of registrations) {
+            const workers = [
+              registration.installing,
+              registration.waiting,
+              registration.active,
+            ];
+            if (workers.some((worker) => worker?.scriptURL === workerUrl)) {
+              await registration.unregister();
+            }
+          }
+        } catch (error) {
+          console.warn("Could not remove an earlier isolation worker", error);
+        }
+      }
+
+"#;
+
+    let mut html = TEMPLATE.replace(
+        "{{SERVICE_WORKER}}",
+        if rayon_threads.is_some() {
+            "    <script src=\"./coi-serviceworker.js\"></script>\n"
+        } else {
+            ""
+        },
+    );
+    html = html.replace("{{APP_MODULE}}", &format!("./app.js?v={asset_version}"));
+    html = html.replace(
+        "{{WORKER_CLEANUP}}",
+        if rayon_threads.is_some() {
+            ""
+        } else {
+            WORKER_CLEANUP
+        },
+    );
+    html = html.replace(
+        "{{MOUNT}}",
+        &match rayon_threads {
+            Some(threads) => format!("await mount(canvas, {{ threads: {threads} }});"),
+            None => "await mount(canvas);".to_owned(),
+        },
+    );
+    format!(
+        "<!-- {SITE_FILE_MARKER}; generated by cargo-myplotlib {VERSION}; do not edit -->\n{html}"
+    )
+}
+
 fn write_web_assets(out_dir: &Path, asset_version: &str) -> Result<(), Error> {
     fs::create_dir_all(out_dir).map_err(|error| {
         Error::new(format!(
@@ -548,10 +763,15 @@ fn write_web_assets(out_dir: &Path, asset_version: &str) -> Result<(), Error> {
              export const myplotlibWebPackageVersion = {WEB_PACKAGE_VERSION};\n\n\
              {}",
             generated_notice(),
-            APP_JS.replace(
-                "new URL(\"./bindings.js\", import.meta.url)",
-                &format!("new URL(\"./bindings.js?v={asset_version}\", import.meta.url)")
-            ),
+            APP_JS
+                .replace(
+                    "\"./myplotlib-loader.js\"",
+                    &format!("\"./myplotlib-loader.js?v={asset_version}\"")
+                )
+                .replace(
+                    "new URL(\"./bindings.js\", import.meta.url)",
+                    &format!("new URL(\"./bindings.js?v={asset_version}\", import.meta.url)")
+                ),
         ),
     )?;
     Ok(())
@@ -597,7 +817,9 @@ mod tests {
             out_dir: PathBuf::from("public/app"),
             release: true,
             locked: true,
+            site: false,
             wasm_threads: false,
+            rayon_threads: None,
             wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
         });
         let options = [
@@ -703,13 +925,71 @@ mod tests {
     }
 
     #[test]
+    fn parses_generated_site_options() {
+        let action = parse_args(arguments(&[
+            "build-web",
+            "--site",
+            "--wasm-threads",
+            "--rayon-threads",
+            "12",
+        ]))
+        .unwrap();
+        let Action::BuildWeb(config) = action else {
+            panic!("expected a build action");
+        };
+        assert!(config.site);
+        assert!(config.wasm_threads);
+        assert_eq!(config.rayon_threads, Some(12));
+
+        let Action::BuildWeb(config) = parse_args(arguments(&["build-web", "--site"])).unwrap()
+        else {
+            panic!("expected a build action");
+        };
+        assert!(config.site);
+        assert!(!config.wasm_threads);
+        assert_eq!(config.rayon_threads, None);
+    }
+
+    #[test]
+    fn rejects_invalid_generated_site_options() {
+        for options in [
+            &["build-web", "--rayon-threads", "4"][..],
+            &["build-web", "--site", "--rayon-threads", "4"][..],
+        ] {
+            let error = parse_args(arguments(options)).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires --site and --wasm-threads")
+            );
+        }
+
+        let error = parse_args(arguments(&["build-web", "--site", "--wasm-threads"])).unwrap_err();
+        assert!(error.to_string().contains("requires --rayon-threads"));
+
+        for value in ["0", "many"] {
+            let error = parse_args(arguments(&[
+                "build-web",
+                "--site",
+                "--wasm-threads",
+                "--rayon-threads",
+                value,
+            ]))
+            .unwrap_err();
+            assert!(error.to_string().contains("requires a positive integer"));
+        }
+    }
+
+    #[test]
     fn constructs_deterministic_wasm_pack_arguments() {
         let config = BuildWeb {
             manifest_path: PathBuf::from("Cargo.toml"),
             out_dir: PathBuf::from("pkg"),
             release: true,
             locked: true,
+            site: false,
             wasm_threads: false,
+            rayon_threads: None,
             wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
         };
         let actual = wasm_pack_arguments(Path::new("/work/app"), Path::new("/work/pkg"), &config);
@@ -779,11 +1059,62 @@ mod tests {
             "export const myplotlibWebPackageVersion = {WEB_PACKAGE_VERSION};"
         )));
         assert!(app.contains("export function mount"));
+        assert!(app.contains("./myplotlib-loader.js?v=test-version"));
         assert!(app.contains("./bindings.js?v=test-version"));
         assert!(loader.starts_with(&notice));
         assert!(loader.contains("export function mountApp"));
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn writes_threaded_and_non_threaded_sites() {
+        let directory = temporary_directory();
+        write_site_assets(&directory, "threaded-version", Some(12)).unwrap();
+
+        let html = fs::read_to_string(directory.join("index.html")).unwrap();
+        assert!(html.contains(SITE_FILE_MARKER));
+        assert!(html.contains("./app.js?v=threaded-version"));
+        assert!(html.contains("<script src=\"./coi-serviceworker.js\"></script>"));
+        assert!(html.contains("await mount(canvas, { threads: 12 });"));
+        assert!(!html.contains("hardwareConcurrency"));
+
+        let headers = fs::read_to_string(directory.join("_headers")).unwrap();
+        assert!(headers.contains(SITE_FILE_MARKER));
+        assert!(headers.contains("\n  Cross-Origin-Opener-Policy: same-origin\n"));
+        assert!(headers.contains("\n  Cross-Origin-Embedder-Policy: require-corp\n"));
+        assert!(headers.contains("\n  Cross-Origin-Resource-Policy: same-origin\n"));
+
+        let worker = fs::read_to_string(directory.join("coi-serviceworker.js")).unwrap();
+        assert!(worker.contains(SITE_FILE_MARKER));
+        assert!(worker.contains("navigator.serviceWorker"));
+
+        write_site_assets(&directory, "ordinary-version", None).unwrap();
+        let html = fs::read_to_string(directory.join("index.html")).unwrap();
+        assert!(html.contains("./app.js?v=ordinary-version"));
+        assert!(html.contains("await mount(canvas);"));
+        assert!(!html.contains("threads:"));
+        assert!(!html.contains("<script src=\"./coi-serviceworker.js\"></script>"));
+        assert!(html.contains("navigator.serviceWorker.getRegistrations()"));
+        assert!(!directory.join("_headers").exists());
+        assert!(!directory.join("coi-serviceworker.js").exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_replace_hand_written_site_files() {
+        for file in SITE_FILES {
+            let directory = temporary_directory();
+            let path = directory.join(file);
+            fs::write(&path, "hand written").unwrap();
+
+            let error = preflight_site_assets(&directory).unwrap_err();
+            assert!(error.to_string().contains("refusing to overwrite"));
+            assert_eq!(fs::read_to_string(path).unwrap(), "hand written");
+
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]
