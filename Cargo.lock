@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-myplotlib"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mime_guess",
  "percent-encoding",
@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "myplotlib"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "egui_plot",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "myplotlib-app-menu"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "myplotlib",
  "wasm-bindgen",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "myplotlib-two-views"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "myplotlib",
  "puruspe",
