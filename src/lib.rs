@@ -1,6 +1,7 @@
 mod app;
 mod appmenu;
 mod controls;
+mod data_import;
 mod figure;
 mod plotter;
 mod save;

@@ -1,11 +1,13 @@
-use crate::Points;
+use crate::{Points, data_import::ImportedSeries};
 use eframe::egui;
 use egui_plot::{
-    GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, PlotUi, VLine,
+    GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, PlotUi,
+    Points as PlotMarkers, VLine,
 };
 use std::fmt::Display;
 
 const DEFAULT_LINE_WIDTH: f32 = 3.0;
+const DEFAULT_MARKER_RADIUS: f32 = 4.0;
 const DEFAULT_LABEL_FONT_SIZE: f32 = 24.0;
 const MIN_LOG10_EXPONENT: f64 = -323.0;
 const MAX_LOG10_EXPONENT: f64 = 308.0;
@@ -87,6 +89,19 @@ fn transform_line(points: &Points, x_scale: AxisScale, y_scale: AxisScale) -> Ve
     }
 
     segments
+}
+
+fn transform_points(points: &Points, x_scale: AxisScale, y_scale: AxisScale) -> Points {
+    points
+        .iter()
+        .filter_map(|&[x, y]| {
+            x_scale
+                .forward(x)
+                .zip(y_scale.forward(y))
+                .map(|(x, y)| [x, y])
+                .filter(|[x, y]| x.is_finite() && y.is_finite())
+        })
+        .collect()
 }
 
 fn log10_grid_marks(input: GridInput) -> Vec<GridMark> {
@@ -487,6 +502,25 @@ impl Plotter {
         }
     }
 
+    fn add_imported_series(&self, plot_ui: &mut PlotUi<'_>, imported: &[ImportedSeries]) {
+        let colour_offset =
+            self.series.len() + self.horizontal_lines.len() + self.vertical_lines.len();
+
+        for (index, series) in imported.iter().enumerate() {
+            let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
+            let points = transform_points(&series.points, self.x_scale, self.y_scale);
+            let markers = PlotMarkers::new(
+                format!("imported_series_{}", series.id),
+                PlotPoints::from(points),
+            )
+            .name(&series.label)
+            .color(colour)
+            .radius(DEFAULT_MARKER_RADIUS);
+
+            plot_ui.points(markers);
+        }
+    }
+
     fn show_summary(&self, ui: &mut egui::Ui, plot_id: egui::Id) {
         if self.summary.is_empty() {
             return;
@@ -531,6 +565,15 @@ impl Plotter {
 
     /// Draws into the available UI area. Use a stable, distinct ID for each plot.
     pub fn show_ui(&self, ui: &mut egui::Ui, id: impl std::hash::Hash) -> egui::Rect {
+        self.show_ui_with_overlays(ui, id, &[])
+    }
+
+    pub(crate) fn show_ui_with_overlays(
+        &self,
+        ui: &mut egui::Ui,
+        id: impl std::hash::Hash,
+        imported: &[ImportedSeries],
+    ) -> egui::Rect {
         let render_data = self.transform_for_rendering();
         let plot_id = ui.make_persistent_id(egui::Id::new(&id));
 
@@ -606,6 +649,7 @@ impl Plotter {
             self.add_series(plot_ui, series_segments);
             self.add_horizontal_lines(plot_ui, horizontal_lines);
             self.add_vertical_lines(plot_ui, vertical_lines);
+            self.add_imported_series(plot_ui, imported);
         });
         ui.set_style(original_style);
 

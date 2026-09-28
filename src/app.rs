@@ -1,3 +1,4 @@
+use crate::data_import::{ImportedSeries, import_dropped_file};
 #[cfg(target_arch = "wasm32")]
 use crate::web::{self, WebHandle, WebResult};
 use crate::{Plotter, SliderGrid, save};
@@ -136,6 +137,181 @@ pub struct App<P: 'static> {
     params: P,
     cached_plotter: Option<AppResult>,
     compute_time: Option<Duration>,
+    view_ui: Vec<ViewUiState>,
+    pending_drop_target: Option<(usize, usize)>,
+}
+
+#[derive(Default)]
+struct AxesUiState {
+    imported: Vec<ImportedSeries>,
+    import_errors: Vec<String>,
+    next_import_id: u64,
+}
+
+struct FigureUiState {
+    axes: Vec<AxesUiState>,
+}
+
+impl FigureUiState {
+    fn single_axes() -> Self {
+        Self {
+            axes: vec![AxesUiState::default()],
+        }
+    }
+}
+
+struct ViewUiState {
+    figure: FigureUiState,
+}
+
+impl ViewUiState {
+    fn single_axes() -> Self {
+        Self {
+            figure: FigureUiState::single_axes(),
+        }
+    }
+}
+
+fn show_axes_ui(
+    ui: &mut Ui,
+    plotter: &Plotter,
+    state: &mut AxesUiState,
+    id: impl std::hash::Hash + Copy,
+) -> egui::Rect {
+    show_import_status(ui, state, id);
+    plotter.show_ui_with_overlays(ui, id, &state.imported)
+}
+
+fn show_import_status(ui: &mut Ui, state: &mut AxesUiState, id: impl std::hash::Hash) {
+    if state.imported.is_empty() && state.import_errors.is_empty() {
+        return;
+    }
+
+    let mut remove_import = None;
+    let mut remove_error = None;
+    ui.scope(|ui| {
+        ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        egui::ScrollArea::horizontal()
+            .id_salt(("plot-import-status", id))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if !state.imported.is_empty() {
+                        ui.label(egui::RichText::new("Imported:").strong());
+                        for (index, series) in state.imported.iter().enumerate() {
+                            if ui
+                                .small_button(format!("{}  ×", series.source_name))
+                                .on_hover_text(format!("Remove imported series {}", series.label))
+                                .clicked()
+                            {
+                                remove_import = Some(index);
+                            }
+                        }
+                    }
+
+                    for (index, error) in state.import_errors.iter().enumerate() {
+                        if !state.imported.is_empty() || index > 0 {
+                            ui.separator();
+                        }
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Dismiss error")
+                            .clicked()
+                        {
+                            remove_error = Some(index);
+                        }
+                    }
+                });
+            });
+    });
+
+    if let Some(index) = remove_import {
+        state.imported.remove(index);
+    }
+    if let Some(index) = remove_error {
+        state.import_errors.remove(index);
+    }
+}
+
+fn handle_file_drop(
+    ui: &Ui,
+    selected_view: usize,
+    pending_target: &mut Option<(usize, usize)>,
+    view_ui: &mut [ViewUiState],
+    plot_rects: &[egui::Rect],
+) {
+    let files_hovering = ui.ctx().input(|input| !input.raw.hovered_files.is_empty());
+    let only_visible_plot = (plot_rects.len() == 1).then_some((selected_view, 0));
+    if files_hovering {
+        *pending_target = ui
+            .ctx()
+            .pointer_latest_pos()
+            .and_then(|pointer| {
+                plot_rects
+                    .iter()
+                    .position(|plot_rect| plot_rect.contains(pointer))
+            })
+            .map(|axes| (selected_view, axes))
+            .or(only_visible_plot);
+
+        if let Some((_, axes)) = *pending_target {
+            paint_drop_target(ui, plot_rects[axes]);
+        }
+    }
+
+    let dropped_files = ui
+        .ctx()
+        .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+    if dropped_files.is_empty() {
+        return;
+    }
+
+    let Some((view, axes)) = pending_target.or(only_visible_plot) else {
+        return;
+    };
+    let Some(axes) = view_ui
+        .get_mut(view)
+        .and_then(|state| state.figure.axes.get_mut(axes))
+    else {
+        return;
+    };
+
+    for file in dropped_files {
+        match import_dropped_file(&file) {
+            Ok(series) => {
+                for mut series in series {
+                    series.id = axes.next_import_id;
+                    axes.next_import_id += 1;
+                    axes.imported.push(series);
+                }
+            }
+            Err(error) => axes.import_errors.push(error),
+        }
+    }
+    ui.ctx().request_repaint();
+}
+
+fn paint_drop_target(ui: &Ui, rect: egui::Rect) {
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        4.0,
+        egui::Color32::from_rgba_unmultiplied(30, 120, 210, 40),
+    );
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(30, 120, 210)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Drop data here",
+        egui::TextStyle::Heading.resolve(ui.style()),
+        egui::Color32::from_rgb(20, 80, 150),
+    );
 }
 
 impl<P> App<P>
@@ -153,12 +329,17 @@ where
     }
 
     pub(crate) fn from_definition(definition: AppDefinition<P>) -> Self {
+        let view_ui = (0..definition.views.len())
+            .map(|_| ViewUiState::single_axes())
+            .collect();
         Self {
             definition,
             selected_view: 0,
             params: P::default(),
             cached_plotter: None,
             compute_time: None,
+            view_ui,
+            pending_drop_target: None,
         }
     }
 
@@ -263,6 +444,10 @@ where
         self.params = P::default();
         self.cached_plotter = None;
         self.compute_time = None;
+        self.view_ui = (0..self.definition.views.len())
+            .map(|_| ViewUiState::single_axes())
+            .collect();
+        self.pending_drop_target = None;
     }
 
     fn draw_controls(&mut self, ui: &mut Ui) -> bool {
@@ -277,15 +462,18 @@ where
         self.compute_time = Some(compute_time);
     }
 
-    fn draw_plot(&self, ui: &mut Ui) {
+    fn draw_plot(&mut self, ui: &mut Ui) -> Option<egui::Rect> {
+        let selected_view = self.selected_view;
         match &self.cached_plotter {
             Some(Ok(plotter)) => {
-                plotter.show_ui(ui, ("plot-app", self.selected_view));
+                let axes = &mut self.view_ui[selected_view].figure.axes[0];
+                Some(show_axes_ui(ui, plotter, axes, ("plot-app", selected_view)))
             }
             Some(Err(error)) => {
                 ui.colored_label(ui.visuals().error_fg_color, error.to_string());
+                None
             }
-            None => {}
+            None => None,
         }
     }
 
@@ -357,7 +545,14 @@ where
 
         ui.separator();
 
-        self.draw_plot(ui);
+        let plot_rect = self.draw_plot(ui);
+        handle_file_drop(
+            ui,
+            self.selected_view,
+            &mut self.pending_drop_target,
+            &mut self.view_ui,
+            plot_rect.as_slice(),
+        );
 
         if save_requested && matches!(self.cached_plotter, Some(Ok(_))) {
             save::request(
@@ -386,7 +581,7 @@ where
     P: Default + 'static,
 {
     let title = definition.title;
-    let native_options = eframe::NativeOptions {
+    let mut native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 600.0])
             .with_min_inner_size([400.0, 300.0])
@@ -394,12 +589,30 @@ where
         ..Default::default()
     };
 
+    prefer_linux_x11_for_file_drop(&mut native_options);
+
     eframe::run_native(
         title,
         native_options,
         Box::new(|creation_context| Ok(Box::new(App::new(creation_context, definition)))),
     )
 }
+
+#[cfg(target_os = "linux")]
+fn prefer_linux_x11_for_file_drop(native_options: &mut eframe::NativeOptions) {
+    use winit::platform::x11::EventLoopBuilderExtX11 as _;
+
+    // winit 0.30 does not emit file drag-and-drop events on Wayland. Prefer
+    // X11 (including XWayland) when it is available so imports work on Linux.
+    if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
+        native_options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_x11();
+        }));
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "linux")))]
+fn prefer_linux_x11_for_file_drop(_native_options: &mut eframe::NativeOptions) {}
 
 /// Mount a new application instance into a canvas supplied by the host page.
 ///

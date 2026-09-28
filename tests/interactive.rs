@@ -4,6 +4,7 @@ use myplotlib::{
     App, AppDefinition, AppResult, AxisScale, Plotter, Slider, SliderGrid, SliderGroup, ViewOption,
 };
 use std::cell::Cell;
+use std::sync::Arc;
 
 fn input(time: f64, events: Vec<egui::Event>) -> egui::RawInput {
     egui::RawInput {
@@ -344,6 +345,64 @@ fn slider_app_renders_caches_switches_views_and_resets() {
 
     let output = draw(0.6, key(egui::Key::R));
     assert!(contains_text(&output, "Amplitude: 0"));
+    assert_eq!(COMPUTATIONS.get(), 4);
+}
+
+#[test]
+fn dropped_data_survives_recomputation_is_isolated_by_view_and_resets() {
+    use eframe::App as _;
+
+    COMPUTATIONS.set(0);
+    const VIEWS: &[ViewOption<Params>] = &[
+        ViewOption::new("First", success, controls),
+        ViewOption::new("Second", success, controls),
+    ];
+    let ctx = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut draw = |input| ctx.run(input, |ctx| app.update(ctx, &mut frame));
+
+    draw(input(0.1, vec![]));
+    assert_eq!(COMPUTATIONS.get(), 1);
+
+    // OS-level file drags do not reliably update egui's pointer position, so a
+    // single-plot app must still select its plot when only HoveredFile arrives.
+    let mut hovering = input(0.2, vec![]);
+    hovering.hovered_files.push(egui::HoveredFile {
+        mime: "text/csv".to_owned(),
+        ..Default::default()
+    });
+    let output = draw(hovering);
+    assert!(contains_text(&output, "Drop data here"));
+
+    // Web file bytes arrive asynchronously. Switching views before delivery must
+    // not move the import away from the plot that was targeted during the drag.
+    let output = draw(input(0.25, key(egui::Key::Num2)));
+    assert!(!contains_text(&output, "measurements.csv  ×"));
+    assert_eq!(COMPUTATIONS.get(), 2);
+
+    let mut dropped = input(0.3, vec![]);
+    dropped.dropped_files.push(egui::DroppedFile {
+        name: "measurements.csv".to_owned(),
+        mime: "text/csv".to_owned(),
+        bytes: Some(Arc::from(&b"time,observed\n0,1\n5,2\n10,1\n"[..])),
+        ..Default::default()
+    });
+    draw(dropped);
+    assert_eq!(COMPUTATIONS.get(), 2, "importing should not recompute");
+
+    let output = draw(input(0.4, vec![]));
+    assert!(!contains_text(&output, "measurements.csv  ×"));
+    assert_eq!(COMPUTATIONS.get(), 2);
+
+    let output = draw(input(0.5, key(egui::Key::Num1)));
+    assert!(contains_text(&output, "measurements.csv  ×"));
+    assert!(contains_text(&output, "observed"));
+    assert_eq!(COMPUTATIONS.get(), 3);
+
+    let output = draw(input(0.6, key(egui::Key::R)));
+    assert!(!contains_text(&output, "measurements.csv  ×"));
     assert_eq!(COMPUTATIONS.get(), 4);
 }
 
