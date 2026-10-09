@@ -24,11 +24,11 @@ fn stream(_: &mut Params) -> StreamPlanResult {
     let series = plot.add_points(Vec::new()).label("Results").id();
     plot.title("Streaming signal");
 
-    Ok(StreamPlan::new(plot, move |sink, _| {
+    Ok(StreamPlan::new(plot, move |stream| {
         RUNS.fetch_add(1, Ordering::Relaxed);
-        sink.append(series, [[0.0, 1.0], [1.0, 2.0]])?;
-        sink.set_progress(0.5)?;
-        sink.append(series, [[2.0, 3.0]])?;
+        stream.append(series, [[0.0, 1.0], [1.0, 2.0]])?;
+        stream.set_progress(0.5)?;
+        stream.append(series, [[2.0, 3.0]])?;
         Ok(())
     }))
 }
@@ -109,12 +109,14 @@ fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
 fn waiting_stream(_: &mut Params) -> StreamPlanResult {
     let mut plot = Plotter::new();
     plot.add_points(Vec::new());
-    Ok(StreamPlan::new(plot, |_, cancel| {
-        while !cancel.is_cancelled() {
+    Ok(StreamPlan::new(plot, |stream| {
+        loop {
+            if stream.checkpoint().is_err() {
+                CANCELLED.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
             std::thread::yield_now();
         }
-        CANCELLED.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }))
 }
 
@@ -128,12 +130,14 @@ fn immediate(_: &mut Params) -> myplotlib::AppResult {
 fn polling_stream(_: &mut Params) -> StreamPlanResult {
     let mut plot = Plotter::new();
     plot.add_points(Vec::new());
-    Ok(StreamPlan::new(plot, |_, cancel| {
-        while !cancel.is_cancelled() {
+    Ok(StreamPlan::new(plot, |stream| {
+        loop {
+            if stream.checkpoint().is_err() {
+                POLL_CANCELLED.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
             std::thread::yield_now();
         }
-        POLL_CANCELLED.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }))
 }
 

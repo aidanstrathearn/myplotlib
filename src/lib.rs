@@ -22,7 +22,7 @@ pub use controls::{Slider, SliderGrid, SliderGroup};
 pub use figure::Figure;
 pub use plotter::{AxisScale, PlotLine, Plotter, ReferenceLine, SeriesId, SummaryItem};
 #[cfg(feature = "streaming")]
-pub use stream::{CancelToken, PlotSink, StreamClosed, StreamError, StreamPlan, StreamResult};
+pub use stream::{StreamContext, StreamError, StreamPlan, StreamResult};
 #[cfg(all(target_arch = "wasm32", feature = "streaming"))]
 pub use wasm_bindgen_rayon::init_thread_pool;
 #[cfg(target_arch = "wasm32")]

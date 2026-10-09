@@ -1,8 +1,8 @@
 //! A streaming Monte Carlo plot using Myplotlib's reusable app API.
 
 use myplotlib::{
-    AppDefinition, AppResult, AxisScale, PlotSink, Plotter, Slider, SliderGrid, SliderGroup,
-    StreamPlan, StreamPlanResult, StreamResult, ViewOption,
+    AppDefinition, AppResult, AxisScale, Plotter, Slider, SliderGrid, SliderGroup, StreamPlan,
+    StreamPlanResult, StreamResult, ViewOption,
 };
 use std::time::Duration;
 use web_time::Instant;
@@ -19,7 +19,6 @@ const MAX_SAMPLES: u64 = 1_000_000_000;
 const TARGET_TRACE_POINTS: u64 = 5_000;
 const REFERENCE_TRACE_POINTS: usize = 200;
 const REFERENCE_MIN_SAMPLES: f64 = 100.0;
-const CANCELLATION_INTERVAL: u64 = 4_096;
 const MAX_BATCH_POINTS: usize = 128;
 const MAX_BATCH_AGE: Duration = Duration::from_millis(33);
 
@@ -71,7 +70,6 @@ impl XorShift64 {
 
 fn calculate_monte_carlo(
     target_samples: u64,
-    mut is_cancelled: impl FnMut() -> bool,
     mut publish: impl FnMut(Vec<[f64; 2]>, f32) -> StreamResult,
 ) -> StreamResult {
     let trace_interval = (target_samples / TARGET_TRACE_POINTS).max(1);
@@ -81,10 +79,6 @@ fn calculate_monte_carlo(
     let mut points = Vec::with_capacity(MAX_BATCH_POINTS);
 
     for completed in 1..=target_samples {
-        if (completed == 1 || completed % CANCELLATION_INTERVAL == 0) && is_cancelled() {
-            return Ok(());
-        }
-
         let x = 2.0 * generator.next_unit() - 1.0;
         let y = 2.0 * generator.next_unit() - 1.0;
         inside_circle += u64::from(x * x + y * y <= 1.0);
@@ -107,23 +101,6 @@ fn calculate_monte_carlo(
     Ok(())
 }
 
-fn run_monte_carlo(
-    target_samples: u64,
-    series: myplotlib::SeriesId,
-    sink: PlotSink,
-    cancel: myplotlib::CancelToken,
-) -> StreamResult {
-    calculate_monte_carlo(
-        target_samples,
-        || cancel.is_cancelled(),
-        |points, progress| {
-            sink.append(series, points)?;
-            sink.set_progress(progress)?;
-            Ok(())
-        },
-    )
-}
-
 fn monte_carlo(params: &mut Params) -> StreamPlanResult {
     let target_samples = params.target_samples;
     let mut plot = Plotter::new();
@@ -139,8 +116,12 @@ fn monte_carlo(params: &mut Params) -> StreamPlanResult {
     plot.xlim(0.0, target_samples as f64);
     plot.ylim(2.8, 3.5);
 
-    Ok(StreamPlan::new(plot, move |sink, cancel| {
-        run_monte_carlo(target_samples, estimate, sink, cancel)
+    Ok(StreamPlan::new(plot, move |stream| {
+        calculate_monte_carlo(target_samples, |points, progress| {
+            stream.append(estimate, points)?;
+            stream.set_progress(progress)?;
+            Ok(())
+        })
     }))
 }
 
@@ -209,14 +190,10 @@ mod tests {
     #[test]
     fn calculation_publishes_batches_and_converges() {
         let mut points = Vec::new();
-        calculate_monte_carlo(
-            100_000,
-            || false,
-            |batch, _| {
-                points.extend(batch);
-                Ok(())
-            },
-        )
+        calculate_monte_carlo(100_000, |batch, _| {
+            points.extend(batch);
+            Ok(())
+        })
         .unwrap();
 
         assert!(points.len() > 1);
@@ -225,18 +202,14 @@ mod tests {
     }
 
     #[test]
-    fn calculation_honours_cancellation_before_starting() {
-        let mut published = false;
-        calculate_monte_carlo(
-            100_000,
-            || true,
-            |_, _| {
-                published = true;
-                Ok(())
-            },
-        )
-        .unwrap();
+    fn calculation_stops_when_publication_stops() {
+        let mut publications = 0;
+        let result = calculate_monte_carlo(100_000, |_, _| {
+            publications += 1;
+            Err(std::io::Error::other("stop publishing").into())
+        });
 
-        assert!(!published);
+        assert_eq!(publications, 1);
+        assert_eq!(result.unwrap_err().to_string(), "stop publishing");
     }
 }

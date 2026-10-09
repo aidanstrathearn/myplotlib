@@ -2,10 +2,10 @@
 
 This example demonstrates a Monte Carlo calculation running away from the UI
 thread and appending batched results to a persistent `Plotter`. It uses
-`ViewOption::streaming`, `StreamPlan`, `PlotSink`, and `CancelToken`; the normal
-Myplotlib app owns the worker lifecycle and the plot UI. A second, synchronous
-view plots the expected statistical error with `ViewOption::new`, showing that
-streaming and immediate views can live in the same app.
+`ViewOption::streaming`, `StreamPlan`, and `StreamContext`; the normal Myplotlib
+app owns the worker lifecycle and the plot UI. A second, synchronous view plots
+the expected statistical error with `ViewOption::new`, showing that streaming
+and immediate views can live in the same app.
 
 Run it natively from the repository root:
 
