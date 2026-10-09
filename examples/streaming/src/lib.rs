@@ -1,8 +1,8 @@
 //! A streaming Monte Carlo plot using Myplotlib's reusable app API.
 
 use myplotlib::{
-    AppDefinition, PlotSink, Plotter, Slider, SliderGrid, SliderGroup, StreamPlan,
-    StreamPlanResult, StreamResult, ViewOption,
+    AppDefinition, AppResult, AxisScale, PlotSink, Plotter, Slider, SliderGrid, SliderGroup,
+    StreamPlan, StreamPlanResult, StreamResult, ViewOption,
 };
 use std::time::Duration;
 use web_time::Instant;
@@ -17,6 +17,8 @@ const DEFAULT_SAMPLES: u64 = 100_000_000;
 const MIN_SAMPLES: u64 = 100_000;
 const MAX_SAMPLES: u64 = 1_000_000_000;
 const TARGET_TRACE_POINTS: u64 = 5_000;
+const REFERENCE_TRACE_POINTS: usize = 200;
+const REFERENCE_MIN_SAMPLES: f64 = 100.0;
 const CANCELLATION_INTERVAL: u64 = 4_096;
 const MAX_BATCH_POINTS: usize = 128;
 const MAX_BATCH_AGE: Duration = Duration::from_millis(33);
@@ -142,7 +144,46 @@ fn monte_carlo(params: &mut Params) -> StreamPlanResult {
     }))
 }
 
-const VIEWS: &[ViewOption<Params>] = &[ViewOption::streaming("Monte Carlo", monte_carlo, controls)];
+fn expected_error(params: &mut Params) -> AppResult {
+    let target_samples = params.target_samples as f64;
+    let log_min = REFERENCE_MIN_SAMPLES.ln();
+    let log_max = target_samples.ln();
+    let hit_probability = std::f64::consts::PI / 4.0;
+    let estimate_standard_deviation = 4.0 * (hit_probability * (1.0 - hit_probability)).sqrt();
+
+    let mut samples = Vec::with_capacity(REFERENCE_TRACE_POINTS + 1);
+    let mut upper = Vec::with_capacity(REFERENCE_TRACE_POINTS + 1);
+    let mut lower = Vec::with_capacity(REFERENCE_TRACE_POINTS + 1);
+
+    for index in 0..=REFERENCE_TRACE_POINTS {
+        let fraction = index as f64 / REFERENCE_TRACE_POINTS as f64;
+        let sample_count = (log_min + fraction * (log_max - log_min)).exp();
+        let confidence_radius = 1.96 * estimate_standard_deviation / sample_count.sqrt();
+        samples.push(sample_count);
+        upper.push(std::f64::consts::PI + confidence_radius);
+        lower.push(std::f64::consts::PI - confidence_radius);
+    }
+
+    let final_radius = 1.96 * estimate_standard_deviation / target_samples.sqrt();
+    let mut plot = Plotter::new();
+    plot.plot(&samples, &upper).label("Upper 95% limit");
+    plot.plot(&samples, &lower).label("Lower 95% limit");
+    plot.axhline(std::f64::consts::PI).label("π reference");
+    plot.xlabel("Samples");
+    plot.ylabel("Estimate of π");
+    plot.title("Expected Monte Carlo uncertainty");
+    plot.xscale(AxisScale::Log10);
+    plot.xlim(REFERENCE_MIN_SAMPLES, target_samples);
+    plot.ylim(2.8, 3.5);
+    plot.add_summary("Target samples", params.target_samples);
+    plot.add_summary("Final 95% radius", format!("{final_radius:.3e}"));
+    Ok(plot)
+}
+
+const VIEWS: &[ViewOption<Params>] = &[
+    ViewOption::streaming("Monte Carlo", monte_carlo, controls),
+    ViewOption::new("Expected error", expected_error, controls),
+];
 
 fn definition() -> AppDefinition<Params> {
     AppDefinition::new("Streaming plot", VIEWS)

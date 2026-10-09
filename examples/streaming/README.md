@@ -3,7 +3,9 @@
 This example demonstrates a Monte Carlo calculation running away from the UI
 thread and appending batched results to a persistent `Plotter`. It uses
 `ViewOption::streaming`, `StreamPlan`, `PlotSink`, and `CancelToken`; the normal
-Myplotlib app owns the worker lifecycle and the plot UI.
+Myplotlib app owns the worker lifecycle and the plot UI. A second, synchronous
+view plots the expected statistical error with `ViewOption::new`, showing that
+streaming and immediate views can live in the same app.
 
 Run it natively from the repository root:
 
@@ -13,7 +15,9 @@ cargo run --manifest-path examples/streaming/Cargo.toml
 
 The target sample slider cancels the active calculation and starts a new run
 after a short debounce. The app header provides Stop, Start or Restart, Reset,
-progress, saving, and status while the plot remains interactive.
+progress, saving, and status while the plot remains interactive. Switching to
+the Expected error view cancels the stream and computes its plot immediately;
+switching back starts a new Monte Carlo run.
 
 Build a threaded WebAssembly site and serve it with cross-origin isolation:
 
