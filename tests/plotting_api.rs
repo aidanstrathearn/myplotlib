@@ -29,6 +29,19 @@ fn supports_the_public_plotting_api() {
 }
 
 #[test]
+fn supports_mutating_a_series_through_its_id() {
+    let mut plot = Plotter::new();
+    let series = plot
+        .add_points(vec![[0.0, 1.0]])
+        .label("Incremental result")
+        .id();
+
+    plot.append_points(series, [[1.0, 2.0], [2.0, 3.0]]);
+    plot.replace_points(series, vec![[3.0, 4.0]]);
+    plot.clear_points(series);
+}
+
+#[test]
 fn supports_the_public_subplot_api() {
     let x = [0.0, 1.0, 2.0];
     let increasing = [0.0, 1.0, 4.0];

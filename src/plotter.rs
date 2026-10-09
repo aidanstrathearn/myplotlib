@@ -222,6 +222,7 @@ struct RenderData {
 }
 
 pub struct PlotLine {
+    id: SeriesId,
     points: Points,
     label: Option<String>,
 }
@@ -231,7 +232,19 @@ impl PlotLine {
         self.label = Some(label.into());
         self
     }
+
+    /// Returns the stable identifier used to update this series.
+    pub fn id(&self) -> SeriesId {
+        self.id
+    }
 }
+
+/// Identifies a data series within the [`Plotter`] that created it.
+///
+/// Series identifiers remain valid for the lifetime of their plotter because
+/// series cannot currently be removed or reordered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SeriesId(usize);
 
 pub struct ReferenceLine {
     value: f64,
@@ -282,7 +295,9 @@ impl Plotter {
 
         let points = x.iter().zip(y.iter()).map(|(&x, &y)| [x, y]).collect();
 
+        let id = SeriesId(self.series.len());
         self.series.push(PlotLine {
+            id,
             points,
             label: None,
         });
@@ -291,12 +306,57 @@ impl Plotter {
     }
 
     pub fn add_points(&mut self, points: Points) -> &mut PlotLine {
+        let id = SeriesId(self.series.len());
         self.series.push(PlotLine {
+            id,
             points,
             label: None,
         });
 
         self.series.last_mut().unwrap()
+    }
+
+    /// Appends points to an existing series.
+    ///
+    /// Pan and zoom state are preserved because the existing series is
+    /// updated in place. Panics if `id` was not created by this plotter.
+    pub fn append_points(
+        &mut self,
+        id: SeriesId,
+        points: impl IntoIterator<Item = [f64; 2]>,
+    ) -> &mut PlotLine {
+        let series = self.series_mut(id);
+        series.points.extend(points);
+        series
+    }
+
+    /// Replaces every point in an existing series.
+    ///
+    /// Pan and zoom state are preserved because the existing series is
+    /// updated in place. Panics if `id` was not created by this plotter.
+    pub fn replace_points(&mut self, id: SeriesId, points: Points) -> &mut PlotLine {
+        let series = self.series_mut(id);
+        series.points = points;
+        series
+    }
+
+    /// Removes every point from an existing series.
+    ///
+    /// Panics if `id` was not created by this plotter.
+    pub fn clear_points(&mut self, id: SeriesId) -> &mut PlotLine {
+        let series = self.series_mut(id);
+        series.points.clear();
+        series
+    }
+
+    fn series_mut(&mut self, id: SeriesId) -> &mut PlotLine {
+        let series_count = self.series.len();
+        self.series.get_mut(id.0).unwrap_or_else(|| {
+            panic!(
+                "series id {} is out of bounds for a plotter with {series_count} series",
+                id.0
+            )
+        })
     }
 
     /// Sets the initial and reset x bounds, while allowing subsequent pan and zoom.
@@ -660,6 +720,28 @@ impl Plotter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn series_ids_update_existing_data_without_changing_its_identity() {
+        let mut plot = Plotter::new();
+        let first = plot.add_points(vec![[0.0, 1.0]]).id();
+        let second = plot.add_points(vec![[10.0, 11.0]]).id();
+
+        assert_ne!(first, second);
+
+        plot.append_points(first, [[1.0, 2.0], [2.0, 3.0]]);
+        assert_eq!(
+            plot.series[first.0].points,
+            vec![[0.0, 1.0], [1.0, 2.0], [2.0, 3.0]]
+        );
+        assert_eq!(plot.series[second.0].points, vec![[10.0, 11.0]]);
+
+        plot.replace_points(first, vec![[4.0, 5.0]]);
+        assert_eq!(plot.series[first.0].points, vec![[4.0, 5.0]]);
+
+        plot.clear_points(first);
+        assert!(plot.series[first.0].points.is_empty());
+    }
 
     #[test]
     fn transforms_and_restores_log10_values() {

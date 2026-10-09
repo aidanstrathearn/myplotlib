@@ -16,7 +16,7 @@ pub use app::{NativeResult, run_native};
 pub use appmenu::AppMenu;
 pub use controls::{Slider, SliderGrid, SliderGroup};
 pub use figure::Figure;
-pub use plotter::{AxisScale, PlotLine, Plotter, ReferenceLine, SummaryItem};
+pub use plotter::{AxisScale, PlotLine, Plotter, ReferenceLine, SeriesId, SummaryItem};
 #[cfg(target_arch = "wasm32")]
 pub use web::{WebHandle, WebResult};
 

@@ -140,6 +140,31 @@ fn axis_limits_allow_navigation_and_restore_on_reset_and_recomputation() {
     assert_eq!(recomputed.bounds().range_y(), -2.0..=2.0);
 }
 
+#[test]
+fn mutating_a_series_preserves_plot_navigation() {
+    let ctx = egui::Context::default();
+    let mut plot = Plotter::new();
+    let series = plot
+        .add_points(vec![[0.0, 0.0], [5.0, 1.0], [10.0, 0.0]])
+        .id();
+    plot.xlim(0.0, 10.0);
+    plot.ylim(-2.0, 2.0);
+
+    let first = plot_frame(&ctx, &plot, input(0.0, vec![]));
+    let position = first.transform().frame().center();
+    plot_frame(
+        &ctx,
+        &plot,
+        input(0.1, vec![egui::Event::PointerMoved(position)]),
+    );
+    let zoomed = plot_frame(&ctx, &plot, input(0.2, vec![egui::Event::Zoom(2.0)]));
+
+    plot.append_points(series, [[15.0, 1.0], [20.0, 0.0]]);
+    let updated = plot_frame(&ctx, &plot, input(0.3, vec![]));
+
+    assert_eq!(updated.bounds(), zoomed.bounds());
+}
+
 fn log_plot() -> Plotter {
     let mut plot = Plotter::new();
     plot.add_points(vec![[1.0, 0.01], [10.0, 1.0], [1000.0, 100.0]])

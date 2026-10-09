@@ -1,0 +1,23 @@
+[package]
+name = "myplotlib-streaming"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+myplotlib = { path = "../.." }
+web-time = "1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow"] }
+rayon = "1.12"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-rayon = { version = "1.3", features = ["no-bundler"] }
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
