@@ -1352,8 +1352,10 @@ dependencies = [
  "egui_plot",
  "js-sys",
  "png",
+ "rayon",
  "rfd",
  "wasm-bindgen",
+ "wasm-bindgen-rayon",
  "web-sys",
  "web-time",
  "winit",
@@ -1373,12 +1375,9 @@ dependencies = [
 name = "myplotlib-streaming"
 version = "0.1.1"
 dependencies = [
- "eframe",
  "myplotlib",
- "rayon",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-bindgen-rayon",
  "web-sys",
  "web-time",
 ]

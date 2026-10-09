@@ -316,6 +316,13 @@ fn contains_text(output: &egui::FullOutput, expected: &str) -> bool {
     })
 }
 
+fn contains_text_starting_with(output: &egui::FullOutput, expected: &str) -> bool {
+    output.shapes.iter().any(|shape| match &shape.shape {
+        egui::Shape::Text(text) => text.galley.job.text.starts_with(expected),
+        _ => false,
+    })
+}
+
 #[test]
 fn slider_app_renders_caches_switches_views_and_resets() {
     use eframe::App as _;
@@ -336,6 +343,7 @@ fn slider_app_renders_caches_switches_views_and_resets() {
     assert_eq!(COMPUTATIONS.get(), 1);
     let output = draw(0.1, vec![]);
     assert_eq!(COMPUTATIONS.get(), 1);
+    assert!(contains_text_starting_with(&output, "Compute: "));
 
     let slider_pos = output
         .shapes

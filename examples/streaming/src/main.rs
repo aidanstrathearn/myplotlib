@@ -1,5 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> eframe::Result {
+fn main() -> myplotlib::NativeResult {
     myplotlib_streaming::run_native()
 }
 

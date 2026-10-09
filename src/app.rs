@@ -1,4 +1,6 @@
 use crate::data_import::{ImportedSeries, import_dropped_file};
+#[cfg(feature = "streaming")]
+use crate::stream::{StreamState, StreamStatus};
 #[cfg(target_arch = "wasm32")]
 use crate::web::{self, WebHandle, WebResult};
 use crate::{Plotter, SliderGrid, save};
@@ -11,7 +13,14 @@ pub type AppError = Box<dyn std::error::Error + 'static>;
 pub type AppResult = std::result::Result<Plotter, AppError>;
 
 pub type PlotAction<P> = fn(&mut P) -> AppResult;
+#[cfg(feature = "streaming")]
+pub type StreamPlanResult = std::result::Result<crate::StreamPlan, AppError>;
+#[cfg(feature = "streaming")]
+pub type StreamAction<P> = fn(&mut P) -> StreamPlanResult;
 pub type ControlsAction<P> = for<'a> fn(&'a mut P) -> SliderGrid<'a>;
+
+#[cfg(feature = "streaming")]
+const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type NativeResult<T = ()> = eframe::Result<T>;
@@ -22,9 +31,23 @@ fn timed<T>(compute: impl FnOnce() -> T) -> (T, Duration) {
     (result, start.elapsed())
 }
 
+enum ViewAction<P> {
+    Immediate(PlotAction<P>),
+    #[cfg(feature = "streaming")]
+    Streaming(StreamAction<P>),
+}
+
+impl<P> Clone for ViewAction<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P> Copy for ViewAction<P> {}
+
 pub struct ViewOption<P> {
     title: &'static str,
-    plot: PlotAction<P>,
+    action: ViewAction<P>,
     controls: ControlsAction<P>,
 }
 
@@ -36,7 +59,21 @@ impl<P> ViewOption<P> {
     ) -> Self {
         Self {
             title,
-            plot,
+            action: ViewAction::Immediate(plot),
+            controls,
+        }
+    }
+
+    /// Creates a view whose plot is updated by background computation.
+    #[cfg(feature = "streaming")]
+    pub const fn streaming(
+        title: &'static str,
+        stream: StreamAction<P>,
+        controls: ControlsAction<P>,
+    ) -> Self {
+        Self {
+            title,
+            action: ViewAction::Streaming(stream),
             controls,
         }
     }
@@ -135,10 +172,36 @@ pub struct App<P: 'static> {
     definition: AppDefinition<P>,
     selected_view: usize,
     params: P,
-    cached_plotter: Option<AppResult>,
+    plot_state: Option<PlotState>,
     compute_time: Option<Duration>,
     view_ui: Vec<ViewUiState>,
     pending_drop_target: Option<(usize, usize)>,
+    #[cfg(feature = "streaming")]
+    pending_stream_restart: Option<Instant>,
+}
+
+enum PlotState {
+    Immediate(AppResult),
+    #[cfg(feature = "streaming")]
+    Streaming(StreamState),
+}
+
+impl PlotState {
+    fn plotter(&self) -> Option<&Plotter> {
+        match self {
+            Self::Immediate(Ok(plotter)) => Some(plotter),
+            Self::Immediate(Err(_)) => None,
+            #[cfg(feature = "streaming")]
+            Self::Streaming(state) => Some(&state.plotter),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "streaming"), allow(dead_code))]
+enum StreamCommand {
+    Start,
+    Stop,
 }
 
 #[derive(Default)]
@@ -336,10 +399,12 @@ where
             definition,
             selected_view: 0,
             params: P::default(),
-            cached_plotter: None,
+            plot_state: None,
             compute_time: None,
             view_ui,
             pending_drop_target: None,
+            #[cfg(feature = "streaming")]
+            pending_stream_restart: None,
         }
     }
 
@@ -347,10 +412,25 @@ where
         &self.definition.views[self.selected_view]
     }
 
-    fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool, bool) {
-        let can_save = matches!(self.cached_plotter, Some(Ok(_)));
+    fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool, bool, Option<StreamCommand>) {
+        let can_save = self
+            .plot_state
+            .as_ref()
+            .and_then(PlotState::plotter)
+            .is_some();
+        #[cfg(feature = "streaming")]
+        let stream_info = self.plot_state.as_ref().and_then(|state| match state {
+            PlotState::Streaming(state) => Some((
+                state.can_stop(),
+                state.status(),
+                state.progress(),
+                state.elapsed(),
+                state.error().map(str::to_owned),
+            )),
+            PlotState::Immediate(_) => None,
+        });
         let save_status_id = Self::save_status_id(ui);
-        let (view_changed, (reset_requested, save_requested)) =
+        let (view_changed, (reset_requested, save_requested, stream_command)) =
             egui::containers::Sides::new().shrink_left().show(
                 ui,
                 |ui| {
@@ -378,7 +458,44 @@ where
                 |ui| {
                     let reset_requested = Self::reset_button(ui);
                     let save_requested = Self::save_button(ui, can_save, save_status_id);
-                    if let Some(compute_time) = self.compute_time {
+                    #[cfg(feature = "streaming")]
+                    let mut stream_command = None;
+                    #[cfg(not(feature = "streaming"))]
+                    let stream_command: Option<StreamCommand> = None;
+                    #[cfg(feature = "streaming")]
+                    let mut showing_stream_status = false;
+                    #[cfg(not(feature = "streaming"))]
+                    let showing_stream_status = false;
+                    #[cfg(feature = "streaming")]
+                    if let Some((can_stop, status, progress, elapsed, error)) = stream_info {
+                        showing_stream_status = true;
+                        let button = if can_stop {
+                            ("Stop", StreamCommand::Stop)
+                        } else if status == StreamStatus::Finished {
+                            ("Restart", StreamCommand::Start)
+                        } else {
+                            ("Start", StreamCommand::Start)
+                        };
+                        if ui.button(button.0).clicked() {
+                            stream_command = Some(button.1);
+                        }
+                        if let Some(progress) = progress {
+                            ui.add(
+                                egui::ProgressBar::new(progress)
+                                    .show_percentage()
+                                    .desired_width(90.0)
+                                    .animate(status == StreamStatus::Running),
+                            );
+                        }
+                        let label = format!("{}: {:.3} s", status.label(), elapsed.as_secs_f64());
+                        if let Some(error) = error {
+                            ui.colored_label(ui.visuals().error_fg_color, label)
+                                .on_hover_text(error);
+                        } else {
+                            ui.label(label);
+                        }
+                    }
+                    if !showing_stream_status && let Some(compute_time) = self.compute_time {
                         let milliseconds = compute_time.as_secs_f64() * 1_000.0;
                         ui.label(format!("Compute: {milliseconds:.3} ms"));
                     }
@@ -388,10 +505,15 @@ where
                         ui.colored_label(ui.visuals().error_fg_color, "Save failed")
                             .on_hover_text(error);
                     }
-                    (reset_requested, save_requested)
+                    (reset_requested, save_requested, stream_command)
                 },
             );
-        (view_changed, reset_requested, save_requested)
+        (
+            view_changed,
+            reset_requested,
+            save_requested,
+            stream_command,
+        )
     }
 
     fn save_status_id(ui: &Ui) -> egui::Id {
@@ -442,12 +564,16 @@ where
         }
         self.selected_view = 0;
         self.params = P::default();
-        self.cached_plotter = None;
+        self.plot_state = None;
         self.compute_time = None;
         self.view_ui = (0..self.definition.views.len())
             .map(|_| ViewUiState::single_axes())
             .collect();
         self.pending_drop_target = None;
+        #[cfg(feature = "streaming")]
+        {
+            self.pending_stream_restart = None;
+        }
     }
 
     fn draw_controls(&mut self, ui: &mut Ui) -> bool {
@@ -456,22 +582,50 @@ where
     }
 
     fn recompute_plot(&mut self) {
-        let plot = self.selected_option().plot;
-        let (result, compute_time) = timed(|| plot(&mut self.params));
-        self.cached_plotter = Some(result);
-        self.compute_time = Some(compute_time);
+        let action = self.selected_option().action;
+        self.plot_state = None;
+        #[cfg(feature = "streaming")]
+        {
+            self.pending_stream_restart = None;
+        }
+        match action {
+            ViewAction::Immediate(plot) => {
+                let (result, compute_time) = timed(|| plot(&mut self.params));
+                self.plot_state = Some(PlotState::Immediate(result));
+                self.compute_time = Some(compute_time);
+            }
+            #[cfg(feature = "streaming")]
+            ViewAction::Streaming(stream) => {
+                let (result, _) = timed(|| stream(&mut self.params));
+                self.compute_time = None;
+                self.plot_state = Some(match result {
+                    Ok(plan) => PlotState::Streaming(StreamState::start(plan)),
+                    Err(error) => PlotState::Immediate(Err(error)),
+                });
+            }
+        }
     }
 
     fn draw_plot(&mut self, ui: &mut Ui) -> Option<egui::Rect> {
         let selected_view = self.selected_view;
-        match &self.cached_plotter {
-            Some(Ok(plotter)) => {
+        match &self.plot_state {
+            Some(PlotState::Immediate(Ok(plotter))) => {
                 let axes = &mut self.view_ui[selected_view].figure.axes[0];
                 Some(show_axes_ui(ui, plotter, axes, ("plot-app", selected_view)))
             }
-            Some(Err(error)) => {
+            Some(PlotState::Immediate(Err(error))) => {
                 ui.colored_label(ui.visuals().error_fg_color, error.to_string());
                 None
+            }
+            #[cfg(feature = "streaming")]
+            Some(PlotState::Streaming(state)) => {
+                let axes = &mut self.view_ui[selected_view].figure.axes[0];
+                Some(show_axes_ui(
+                    ui,
+                    &state.plotter,
+                    axes,
+                    ("plot-app", selected_view),
+                ))
             }
             None => None,
         }
@@ -485,6 +639,66 @@ where
             (false, _) => format!("{title}.png"),
             (_, false) => format!("{view}.png"),
             _ => "plot.png".to_owned(),
+        }
+    }
+
+    #[cfg(feature = "streaming")]
+    fn selected_is_streaming(&self) -> bool {
+        matches!(self.selected_option().action, ViewAction::Streaming(_))
+    }
+
+    #[cfg(not(feature = "streaming"))]
+    fn selected_is_streaming(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "streaming")]
+    fn maintain_stream(&mut self, context: &egui::Context) {
+        if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
+            state.drain();
+        }
+
+        let Some(restart_at) = self.pending_stream_restart else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= restart_at {
+            self.recompute_plot();
+        } else {
+            context.request_repaint_after(restart_at - now);
+        }
+    }
+
+    #[cfg(not(feature = "streaming"))]
+    fn maintain_stream(&mut self, _context: &egui::Context) {}
+
+    #[cfg(feature = "streaming")]
+    fn schedule_stream_restart(&mut self, context: &egui::Context) {
+        const RESTART_DELAY: Duration = Duration::from_millis(150);
+
+        if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
+            state.mark_restart_pending();
+        }
+        self.pending_stream_restart = Some(Instant::now() + RESTART_DELAY);
+        context.request_repaint_after(RESTART_DELAY);
+    }
+
+    #[cfg(feature = "streaming")]
+    fn stop_stream(&mut self) {
+        self.pending_stream_restart = None;
+        if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
+            state.stop();
+        }
+    }
+
+    #[cfg(feature = "streaming")]
+    fn schedule_stream_frame(&self, context: &egui::Context) {
+        let live_stream = self.plot_state.as_ref().is_some_and(|state| match state {
+            PlotState::Streaming(state) => state.needs_repaint_poll(),
+            PlotState::Immediate(_) => false,
+        });
+        if live_stream || self.pending_stream_restart.is_some() {
+            context.request_repaint_after(STREAM_REPAINT_INTERVAL);
         }
     }
 }
@@ -514,11 +728,10 @@ where
     P: Default + 'static,
 {
     pub(crate) fn show_ui(&mut self, ui: &mut Ui) {
-        let (view_changed, reset_requested, save_requested) = self.draw_header(ui);
-        let mut changed = view_changed;
+        self.maintain_stream(ui.ctx());
+        let (view_changed, reset_requested, save_requested, stream_command) = self.draw_header(ui);
         if reset_requested {
             self.reset(ui);
-            changed = true;
         }
 
         ui.separator();
@@ -527,7 +740,7 @@ where
         // plot titles and legends, the plot itself, and its summary panel.
         let capture_rect = ui.available_rect_before_wrap();
 
-        changed |= ui
+        let controls_changed = ui
             .scope(|ui| {
                 ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
@@ -538,9 +751,23 @@ where
                     .inner
             })
             .inner;
-        if changed || self.cached_plotter.is_none() {
+
+        let needs_immediate_recompute =
+            view_changed || reset_requested || self.plot_state.is_none();
+        if needs_immediate_recompute || matches!(stream_command, Some(StreamCommand::Start)) {
             self.recompute_plot();
             ui.ctx().request_repaint();
+        } else if matches!(stream_command, Some(StreamCommand::Stop)) {
+            #[cfg(feature = "streaming")]
+            self.stop_stream();
+        } else if controls_changed {
+            if self.selected_is_streaming() {
+                #[cfg(feature = "streaming")]
+                self.schedule_stream_restart(ui.ctx());
+            } else {
+                self.recompute_plot();
+                ui.ctx().request_repaint();
+            }
         }
 
         ui.separator();
@@ -554,7 +781,13 @@ where
             plot_rect.as_slice(),
         );
 
-        if save_requested && matches!(self.cached_plotter, Some(Ok(_))) {
+        if save_requested
+            && self
+                .plot_state
+                .as_ref()
+                .and_then(PlotState::plotter)
+                .is_some()
+        {
             save::request(
                 ui.ctx(),
                 capture_rect,
@@ -562,6 +795,9 @@ where
                 Self::save_status_id(ui),
             );
         }
+
+        #[cfg(feature = "streaming")]
+        self.schedule_stream_frame(ui.ctx());
     }
 }
 
