@@ -1376,6 +1376,7 @@ name = "myplotlib-streaming"
 version = "0.1.1"
 dependencies = [
  "myplotlib",
+ "puruspe",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

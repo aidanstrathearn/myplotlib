@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 myplotlib = { path = "../..", features = ["streaming"] }
+puruspe = "0.4.4"
 web-time = "1.1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

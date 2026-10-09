@@ -1,11 +1,13 @@
-# Streaming plot
+# Streaming plots
 
-This example demonstrates a Monte Carlo calculation running away from the UI
-thread and appending batched results to a persistent `Plotter`. It uses
+This example demonstrates background calculations updating persistent plots. A
+Monte Carlo calculation appends batches to a growing trace, while a numerical
+Gaussian–Lorentzian convolution repeatedly replaces a complete trace as it
+evolves from a Gaussian into a Voigt profile. Both use
 `ViewOption::streaming`, `StreamPlan`, and `StreamContext`; the normal Myplotlib
-app owns the worker lifecycle and the plot UI. A second, synchronous view plots
-the expected statistical error with `ViewOption::new`, showing that streaming
-and immediate views can live in the same app.
+app owns the worker lifecycle and plot UI. A synchronous view plots the expected
+Monte Carlo error with `ViewOption::new`, showing that streaming and immediate
+views can live in the same app.
 
 Run it natively from the repository root:
 
@@ -13,11 +15,12 @@ Run it natively from the repository root:
 cargo run --manifest-path examples/streaming/Cargo.toml
 ```
 
-The target sample slider cancels the active calculation and starts a new run
-after a short debounce. The app header provides Stop, Start or Restart, Reset,
-progress, saving, and status while the plot remains interactive. Switching to
-the Expected error view cancels the stream and computes its plot immediately;
-switching back starts a new Monte Carlo run.
+Changing a streaming view's controls cancels the active calculation and starts
+a new run after a short debounce. The app header provides Stop, Start or
+Restart, Reset, progress, saving, and status while the plot remains interactive.
+Switching to the Expected error view cancels the stream and computes its plot
+immediately; switching to either streaming view starts a new background
+calculation.
 
 Build a threaded WebAssembly site and serve it with cross-origin isolation:
 
