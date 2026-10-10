@@ -28,11 +28,20 @@ const MAX_VOIGT_STEPS: usize = 1_000_000_000;
 const VOIGT_PLOT_POINTS: usize = 501;
 const VOIGT_X_LIMIT: f64 = 8.0;
 const SQRT_2_PI: f64 = 2.506_628_274_631_000_2;
+const MIN_GAUSSIAN_SIGMA: f64 = 0.1;
+const MAX_GAUSSIAN_SIGMA: f64 = 2.0;
+const MIN_LORENTZIAN_GAMMA: f64 = 0.02;
+const MAX_LORENTZIAN_GAMMA: f64 = 1.5;
+const MIN_FIT_GAMMA: f64 = 0.0;
+const FIT_SAMPLE_STRIDE: usize = 4;
+const FIT_ITERATIONS: usize = 16;
 
 struct Params {
     target_samples: u64,
     gaussian_sigma: f64,
     lorentzian_gamma: f64,
+    fit_sigma: f64,
+    fit_gamma: f64,
     voigt_steps: usize,
 }
 
@@ -45,6 +54,8 @@ impl Default for Params {
             target_samples: DEFAULT_SAMPLES,
             gaussian_sigma: 0.8,
             lorentzian_gamma: 0.35,
+            fit_sigma: 1.2,
+            fit_gamma: 0.7,
             voigt_steps: DEFAULT_VOIGT_STEPS,
         }
     }
@@ -147,10 +158,33 @@ fn voigt_controls(params: &mut Params) -> SliderGrid<'_> {
             SliderGroup::new(
                 "Profile widths",
                 [
-                    Slider::new("Gaussian σ", &mut params.gaussian_sigma, 0.1..=2.0)
-                        .logarithmic(true),
-                    Slider::new("Lorentzian γ", &mut params.lorentzian_gamma, 0.02..=1.5)
-                        .logarithmic(true),
+                    Slider::new(
+                        "Gaussian σ",
+                        &mut params.gaussian_sigma,
+                        MIN_GAUSSIAN_SIGMA..=MAX_GAUSSIAN_SIGMA,
+                    )
+                    .logarithmic(true),
+                    Slider::new(
+                        "Lorentzian γ",
+                        &mut params.lorentzian_gamma,
+                        MIN_LORENTZIAN_GAMMA..=MAX_LORENTZIAN_GAMMA,
+                    )
+                    .logarithmic(true),
+                ],
+            ),
+            SliderGroup::new(
+                "Fitted Voigt",
+                [
+                    Slider::new(
+                        "Fitted Gaussian σ",
+                        &mut params.fit_sigma,
+                        MIN_GAUSSIAN_SIGMA..=MAX_GAUSSIAN_SIGMA,
+                    ),
+                    Slider::new(
+                        "Fitted Lorentzian γ",
+                        &mut params.fit_gamma,
+                        MIN_FIT_GAMMA..=MAX_LORENTZIAN_GAMMA,
+                    ),
                 ],
             ),
             SliderGroup::new(
@@ -191,14 +225,102 @@ fn profile_points(x_values: &[f64], accumulated: &[f64], samples: usize) -> Vec<
         .collect()
 }
 
-fn calculate_voigt(
+fn voigt_points(x_values: &[f64], sigma: f64, gamma: f64) -> Vec<[f64; 2]> {
+    x_values
+        .iter()
+        .map(|&x| [x, analytic_voigt(x, sigma, gamma)])
+        .collect()
+}
+
+fn voigt_fit_error(
+    x_values: &[f64],
+    accumulated: &[f64],
+    samples: usize,
+    sigma: f64,
+    gamma: f64,
+) -> f64 {
+    let normalisation = 1.0 / samples as f64;
+    x_values
+        .iter()
+        .zip(accumulated)
+        .step_by(FIT_SAMPLE_STRIDE)
+        .map(|(&x, &sum)| {
+            let residual = analytic_voigt(x, sigma, gamma) - sum * normalisation;
+            residual * residual
+        })
+        .sum()
+}
+
+fn fit_voigt(
+    x_values: &[f64],
+    accumulated: &[f64],
+    samples: usize,
+    initial_sigma: f64,
+    initial_gamma: f64,
+) -> (f64, f64) {
+    let mut sigma = initial_sigma.clamp(MIN_GAUSSIAN_SIGMA, MAX_GAUSSIAN_SIGMA);
+    let mut gamma = initial_gamma.clamp(MIN_FIT_GAMMA, MAX_LORENTZIAN_GAMMA);
+    let mut sigma_step = (MAX_GAUSSIAN_SIGMA - MIN_GAUSSIAN_SIGMA) / 8.0;
+    let mut gamma_step = (MAX_LORENTZIAN_GAMMA - MIN_FIT_GAMMA) / 8.0;
+    let mut best_error = voigt_fit_error(x_values, accumulated, samples, sigma, gamma);
+
+    for _ in 0..FIT_ITERATIONS {
+        let mut next = (sigma, gamma, best_error);
+        for sigma_direction in [-1.0, 0.0, 1.0] {
+            for gamma_direction in [-1.0, 0.0, 1.0] {
+                if sigma_direction == 0.0 && gamma_direction == 0.0 {
+                    continue;
+                }
+                let candidate_sigma = (sigma + sigma_direction * sigma_step)
+                    .clamp(MIN_GAUSSIAN_SIGMA, MAX_GAUSSIAN_SIGMA);
+                let candidate_gamma = (gamma + gamma_direction * gamma_step)
+                    .clamp(MIN_FIT_GAMMA, MAX_LORENTZIAN_GAMMA);
+                let error = voigt_fit_error(
+                    x_values,
+                    accumulated,
+                    samples,
+                    candidate_sigma,
+                    candidate_gamma,
+                );
+                if error < next.2 {
+                    next = (candidate_sigma, candidate_gamma, error);
+                }
+            }
+        }
+
+        if next.2 < best_error {
+            (sigma, gamma, best_error) = next;
+        } else {
+            sigma_step *= 0.5;
+            gamma_step *= 0.5;
+        }
+    }
+
+    (sigma, gamma)
+}
+
+struct VoigtCalculation {
     x_values: Vec<f64>,
     sigma: f64,
     gamma: f64,
     steps: usize,
-    series: SeriesId,
-    stream: Context,
-) -> StreamResult {
+    partial_series: SeriesId,
+    fitted_series: SeriesId,
+    fit_sigma: f64,
+    fit_gamma: f64,
+}
+
+fn calculate_voigt(calculation: VoigtCalculation, stream: Context) -> StreamResult {
+    let VoigtCalculation {
+        x_values,
+        sigma,
+        gamma,
+        steps,
+        partial_series,
+        fitted_series,
+        mut fit_sigma,
+        mut fit_gamma,
+    } = calculation;
     let sample_count = 2 * steps + 1;
     let mut accumulated: Vec<_> = x_values.iter().map(|&x| gaussian(x, sigma)).collect();
     let mut last_publish = Instant::now();
@@ -212,10 +334,23 @@ fn calculate_voigt(
         add_shift_pair(&mut accumulated, &x_values, sigma, shift);
 
         if last_publish.elapsed() >= MAX_BATCH_AGE || step == steps {
+            let partial_samples = 2 * step + 1;
+            (fit_sigma, fit_gamma) = fit_voigt(
+                &x_values,
+                &accumulated,
+                partial_samples,
+                fit_sigma,
+                fit_gamma,
+            );
             stream.replace(
-                series,
-                profile_points(&x_values, &accumulated, 2 * step + 1),
+                partial_series,
+                profile_points(&x_values, &accumulated, partial_samples),
             )?;
+            stream.replace(fitted_series, voigt_points(&x_values, fit_sigma, fit_gamma))?;
+            stream.update_params(move |params: &mut Params| {
+                params.fit_sigma = fit_sigma;
+                params.fit_gamma = fit_gamma;
+            })?;
             stream.set_progress(step as f32 / steps as f32)?;
             last_publish = Instant::now();
         }
@@ -227,6 +362,8 @@ fn calculate_voigt(
 fn voigt(params: &mut Params) -> PlanResult {
     let sigma = params.gaussian_sigma;
     let gamma = params.lorentzian_gamma;
+    let fit_sigma = params.fit_sigma;
+    let fit_gamma = params.fit_gamma;
     let steps = params.voigt_steps;
     let x_values: Vec<_> = (0..VOIGT_PLOT_POINTS)
         .map(|index| {
@@ -234,23 +371,35 @@ fn voigt(params: &mut Params) -> PlanResult {
         })
         .collect();
     let initial: Vec<_> = x_values.iter().map(|&x| [x, gaussian(x, sigma)]).collect();
-    let target: Vec<_> = x_values
-        .iter()
-        .map(|&x| [x, analytic_voigt(x, sigma, gamma)])
-        .collect();
+    let fitted = voigt_points(&x_values, fit_sigma, fit_gamma);
+    let target = voigt_points(&x_values, sigma, gamma);
 
     let mut plot = Plotter::new();
     let partial = plot.add_points(initial).label("Partial convolution").id();
+    let fitted = plot.add_points(fitted).label("Fitted Voigt").id();
     plot.add_points(target).label("Analytic Voigt target");
     plot.xlabel("x");
     plot.ylabel("Normalized profile");
     plot.title("Gaussian evolving into a Voigt profile");
     plot.xlim(-VOIGT_X_LIMIT, VOIGT_X_LIMIT);
-    plot.ylim(0.0, 1.1 * gaussian(0.0, sigma));
+    let initial_peak = gaussian(0.0, sigma).max(analytic_voigt(0.0, fit_sigma, fit_gamma));
+    plot.ylim(0.0, 1.1 * initial_peak);
     plot.add_summary("Integration samples", 2 * steps + 1);
 
     Ok(StreamPlan::new(plot, move |stream| {
-        calculate_voigt(x_values, sigma, gamma, steps, partial, stream)
+        calculate_voigt(
+            VoigtCalculation {
+                x_values,
+                sigma,
+                gamma,
+                steps,
+                partial_series: partial,
+                fitted_series: fitted,
+                fit_sigma,
+                fit_gamma,
+            },
+            stream,
+        )
     }))
 }
 
@@ -353,5 +502,57 @@ mod tests {
                 "at x={x}: numerical={numerical}, analytic={analytic}"
             );
         }
+    }
+
+    #[test]
+    fn fitted_voigt_recovers_profile_widths() {
+        let sigma = 0.8;
+        let gamma = 0.35;
+        let x_values: Vec<_> = (0..VOIGT_PLOT_POINTS)
+            .map(|index| {
+                -VOIGT_X_LIMIT + 2.0 * VOIGT_X_LIMIT * index as f64 / (VOIGT_PLOT_POINTS - 1) as f64
+            })
+            .collect();
+        let observed: Vec<_> = x_values
+            .iter()
+            .map(|&x| analytic_voigt(x, sigma, gamma))
+            .collect();
+
+        let (fitted_sigma, fitted_gamma) = fit_voigt(&x_values, &observed, 1, 1.2, 0.7);
+
+        assert!((fitted_sigma - sigma).abs() < 0.002, "{fitted_sigma}");
+        assert!((fitted_gamma - gamma).abs() < 0.002, "{fitted_gamma}");
+    }
+
+    #[test]
+    fn fitted_widths_converge_as_the_integral_grows() {
+        let sigma = 0.8;
+        let gamma = 0.35;
+        let steps = 1024;
+        let sample_count = 2 * steps + 1;
+        let x_values: Vec<_> = (0..VOIGT_PLOT_POINTS)
+            .map(|index| {
+                -VOIGT_X_LIMIT + 2.0 * VOIGT_X_LIMIT * index as f64 / (VOIGT_PLOT_POINTS - 1) as f64
+            })
+            .collect();
+        let mut accumulated: Vec<_> = x_values.iter().map(|&x| gaussian(x, sigma)).collect();
+        let mut fitted = (1.2, 0.7);
+        let mut early = None;
+
+        for step in 1..=steps {
+            let quantile = 0.5 + step as f64 / sample_count as f64;
+            let shift = gamma * (PI * (quantile - 0.5)).tan();
+            add_shift_pair(&mut accumulated, &x_values, sigma, shift);
+
+            if step == steps / 8 || step == steps {
+                fitted = fit_voigt(&x_values, &accumulated, 2 * step + 1, fitted.0, fitted.1);
+                early.get_or_insert(fitted);
+            }
+        }
+
+        let distance = |fit: (f64, f64)| (fit.0 - sigma).abs() + (fit.1 - gamma).abs();
+        assert!(distance(fitted) < distance(early.unwrap()));
+        assert!((fitted.0 - sigma).abs() < 0.01, "{}", fitted.0);
+        assert!((fitted.1 - gamma).abs() < 0.01, "{}", fitted.1);
     }
 }

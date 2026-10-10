@@ -3,7 +3,10 @@
 This example demonstrates background calculations updating persistent plots. A
 Monte Carlo calculation appends batches to a growing trace, while a numerical
 Gaussian–Lorentzian convolution repeatedly replaces a complete trace as it
-evolves from a Gaussian into a Voigt profile. Both use
+evolves from a Gaussian into a Voigt profile. The convolution view also fits a
+Voigt profile to each published partial result, replaces a fitted trace, and
+uses `StreamContext::update_params` to drive fitted-width sliders toward the
+input widths. Both use
 `ViewOption::streaming`, `StreamPlan`, and `StreamContext`; the normal Myplotlib
 app owns the worker lifecycle and plot UI. A synchronous view plots the expected
 Monte Carlo error with `ViewOption::new`, showing that streaming and immediate
@@ -17,7 +20,8 @@ cargo run --manifest-path examples/streaming/Cargo.toml
 
 Selecting a streaming view prepares its initial plot without starting the
 calculation. Adjusting its controls rebuilds that initial plot, so the Gaussian
-and Lorentzian inputs can be inspected before running the Voigt integration.
+and Lorentzian inputs and the fit's initial guess can be inspected before
+running the Voigt integration.
 Start, Stop, progress, and status sit beside the view's controls. Reset, saving,
 and compute time remain in the app header. Ready views show the time used to
 prepare their initial plot; a completed stream replaces it with the background
