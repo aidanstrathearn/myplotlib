@@ -59,6 +59,33 @@ fn key_input(time: f64, key: egui::Key) -> egui::RawInput {
     input
 }
 
+fn pointer_input(time: f64, position: egui::Pos2, pressed: bool) -> egui::RawInput {
+    let mut input = input(time);
+    input.events = vec![
+        egui::Event::PointerMoved(position),
+        egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ];
+    input
+}
+
+fn text_position(output: &egui::FullOutput, expected: &str) -> egui::Pos2 {
+    output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == expected => {
+                Some(text.pos + egui::vec2(3.0, 3.0))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{expected:?} should be visible"))
+}
+
 fn contains_text_starting_with(output: &egui::FullOutput, expected: &str) -> bool {
     output.shapes.iter().any(|shape| match &shape.shape {
         egui::Shape::Text(text) => text.galley.job.text.starts_with(expected),
@@ -84,16 +111,32 @@ fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
     let mut frame_time = 0.0;
     let mut finished = false;
 
+    let ready = context.run(input(frame_time), |context| {
+        app.update(context, &mut frame);
+    });
+    assert!(contains_text_starting_with(&ready, "Ready"));
+    assert_eq!(RUNS.load(Ordering::Relaxed), 0);
+    let start = text_position(&ready, "Start");
+    frame_time += 0.01;
+    let _ = context.run(pointer_input(frame_time, start, true), |context| {
+        app.update(context, &mut frame);
+    });
+    frame_time += 0.01;
+    let _ = context.run(pointer_input(frame_time, start, false), |context| {
+        app.update(context, &mut frame);
+    });
+
     while Instant::now() < deadline {
+        frame_time += 0.01;
         let output = context.run(input(frame_time), |context| {
             app.update(context, &mut frame);
         });
-        finished = contains_text_starting_with(&output, "Finished:");
+        finished = contains_text_starting_with(&output, "Finished");
         if finished {
             assert!(contains_text_starting_with(&output, "Streaming signal"));
+            assert!(contains_text_starting_with(&output, "Compute: "));
             break;
         }
-        frame_time += 0.01;
         std::thread::yield_now();
     }
 
@@ -155,7 +198,14 @@ fn switching_views_cancels_the_previous_stream() {
     let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
     let mut frame = eframe::Frame::_new_kittest();
 
-    let _ = context.run(input(0.0), |context| app.update(context, &mut frame));
+    let ready = context.run(input(0.0), |context| app.update(context, &mut frame));
+    let start = text_position(&ready, "Start");
+    let _ = context.run(pointer_input(0.01, start, true), |context| {
+        app.update(context, &mut frame)
+    });
+    let _ = context.run(pointer_input(0.02, start, false), |context| {
+        app.update(context, &mut frame)
+    });
     let output = context.run(key_input(0.1, egui::Key::Num2), |context| {
         app.update(context, &mut frame);
     });
@@ -180,12 +230,36 @@ fn active_stream_schedules_ui_thread_repaints() {
     let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
     let mut frame = eframe::Frame::_new_kittest();
 
-    for frame_index in 0..3 {
-        let _ = context.run(input(f64::from(frame_index) * 0.01), |context| {
-            app.update(context, &mut frame);
-        });
+    let ready = context.run(input(0.0), |context| app.update(context, &mut frame));
+    assert_eq!(repaint_delay(&ready), Duration::ZERO);
+    let mut settled_ready = ready;
+    let mut frame_time = 0.0;
+    for frame_index in 1..=10 {
+        frame_time = f64::from(frame_index) * 0.1;
+        settled_ready = context.run(input(frame_time), |context| app.update(context, &mut frame));
+        if repaint_delay(&settled_ready) == Duration::MAX {
+            break;
+        }
     }
-    let output = context.run(input(0.04), |context| app.update(context, &mut frame));
+    assert_eq!(repaint_delay(&settled_ready), Duration::MAX);
+    let start = text_position(&settled_ready, "Start");
+    frame_time += 0.01;
+    let _ = context.run(pointer_input(frame_time, start, true), |context| {
+        app.update(context, &mut frame)
+    });
+    frame_time += 0.01;
+    let _ = context.run(pointer_input(frame_time, start, false), |context| {
+        app.update(context, &mut frame)
+    });
+    frame_time += 0.01;
+    let mut output = context.run(input(frame_time), |context| app.update(context, &mut frame));
+    for _ in 0..10 {
+        if repaint_delay(&output) > Duration::ZERO {
+            break;
+        }
+        frame_time += 0.1;
+        output = context.run(input(frame_time), |context| app.update(context, &mut frame));
+    }
     assert!(repaint_delay(&output) > Duration::ZERO);
     assert!(repaint_delay(&output) <= Duration::from_millis(33));
 

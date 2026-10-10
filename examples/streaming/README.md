@@ -15,12 +15,13 @@ Run it natively from the repository root:
 cargo run --manifest-path examples/streaming/Cargo.toml
 ```
 
-Changing a streaming view's controls cancels the active calculation and starts
-a new run after a short debounce. The app header provides Stop, Start or
-Restart, Reset, progress, saving, and status while the plot remains interactive.
-Switching to the Expected error view cancels the stream and computes its plot
-immediately; switching to either streaming view starts a new background
-calculation.
+Selecting a streaming view prepares its initial plot without starting the
+calculation. Adjusting its controls rebuilds that initial plot, so the Gaussian
+and Lorentzian inputs can be inspected before running the Voigt integration.
+Start, Stop, progress, and status sit beside the view's controls. Reset, saving,
+and the final compute time remain in the app header. Changing controls or views
+cancels active work; press Start when the new inputs are ready. The Expected
+error view remains synchronous and computes immediately.
 
 Build a threaded WebAssembly site and serve it with cross-origin isolation:
 

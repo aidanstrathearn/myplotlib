@@ -65,6 +65,9 @@ impl<P> ViewOption<P> {
     }
 
     /// Creates a view whose plot is updated by background computation.
+    ///
+    /// The initial plot is shown in a ready state. Computation begins only
+    /// after the user presses Start.
     #[cfg(feature = "streaming")]
     pub const fn streaming(
         title: &'static str,
@@ -176,8 +179,6 @@ pub struct App<P: 'static> {
     compute_time: Option<Duration>,
     view_ui: Vec<ViewUiState>,
     pending_drop_target: Option<(usize, usize)>,
-    #[cfg(feature = "streaming")]
-    pending_stream_restart: Option<Instant>,
 }
 
 enum PlotState {
@@ -403,8 +404,6 @@ where
             compute_time: None,
             view_ui,
             pending_drop_target: None,
-            #[cfg(feature = "streaming")]
-            pending_stream_restart: None,
         }
     }
 
@@ -412,25 +411,14 @@ where
         &self.definition.views[self.selected_view]
     }
 
-    fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool, bool, Option<StreamCommand>) {
+    fn draw_header(&mut self, ui: &mut Ui) -> (bool, bool, bool) {
         let can_save = self
             .plot_state
             .as_ref()
             .and_then(PlotState::plotter)
             .is_some();
-        #[cfg(feature = "streaming")]
-        let stream_info = self.plot_state.as_ref().and_then(|state| match state {
-            PlotState::Streaming(state) => Some((
-                state.can_stop(),
-                state.status(),
-                state.progress(),
-                state.elapsed(),
-                state.error().map(str::to_owned),
-            )),
-            PlotState::Immediate(_) => None,
-        });
         let save_status_id = Self::save_status_id(ui);
-        let (view_changed, (reset_requested, save_requested, stream_command)) =
+        let (view_changed, (reset_requested, save_requested)) =
             egui::containers::Sides::new().shrink_left().show(
                 ui,
                 |ui| {
@@ -458,44 +446,7 @@ where
                 |ui| {
                     let reset_requested = Self::reset_button(ui);
                     let save_requested = Self::save_button(ui, can_save, save_status_id);
-                    #[cfg(feature = "streaming")]
-                    let mut stream_command = None;
-                    #[cfg(not(feature = "streaming"))]
-                    let stream_command: Option<StreamCommand> = None;
-                    #[cfg(feature = "streaming")]
-                    let mut showing_stream_status = false;
-                    #[cfg(not(feature = "streaming"))]
-                    let showing_stream_status = false;
-                    #[cfg(feature = "streaming")]
-                    if let Some((can_stop, status, progress, elapsed, error)) = stream_info {
-                        showing_stream_status = true;
-                        let button = if can_stop {
-                            ("Stop", StreamCommand::Stop)
-                        } else if status == StreamStatus::Finished {
-                            ("Restart", StreamCommand::Start)
-                        } else {
-                            ("Start", StreamCommand::Start)
-                        };
-                        if ui.button(button.0).clicked() {
-                            stream_command = Some(button.1);
-                        }
-                        if let Some(progress) = progress {
-                            ui.add(
-                                egui::ProgressBar::new(progress)
-                                    .show_percentage()
-                                    .desired_width(90.0)
-                                    .animate(status == StreamStatus::Running),
-                            );
-                        }
-                        let label = format!("{}: {:.3} s", status.label(), elapsed.as_secs_f64());
-                        if let Some(error) = error {
-                            ui.colored_label(ui.visuals().error_fg_color, label)
-                                .on_hover_text(error);
-                        } else {
-                            ui.label(label);
-                        }
-                    }
-                    if !showing_stream_status && let Some(compute_time) = self.compute_time {
+                    if let Some(compute_time) = self.compute_time {
                         let milliseconds = compute_time.as_secs_f64() * 1_000.0;
                         ui.label(format!("Compute: {milliseconds:.3} ms"));
                     }
@@ -505,15 +456,10 @@ where
                         ui.colored_label(ui.visuals().error_fg_color, "Save failed")
                             .on_hover_text(error);
                     }
-                    (reset_requested, save_requested, stream_command)
+                    (reset_requested, save_requested)
                 },
             );
-        (
-            view_changed,
-            reset_requested,
-            save_requested,
-            stream_command,
-        )
+        (view_changed, reset_requested, save_requested)
     }
 
     fn save_status_id(ui: &Ui) -> egui::Id {
@@ -570,10 +516,6 @@ where
             .map(|_| ViewUiState::single_axes())
             .collect();
         self.pending_drop_target = None;
-        #[cfg(feature = "streaming")]
-        {
-            self.pending_stream_restart = None;
-        }
     }
 
     fn draw_controls(&mut self, ui: &mut Ui) -> bool {
@@ -581,13 +523,92 @@ where
         controls(&mut self.params).show(ui)
     }
 
-    fn recompute_plot(&mut self) {
+    fn draw_control_row(&mut self, ui: &mut Ui) -> (bool, Option<StreamCommand>) {
+        #[cfg(feature = "streaming")]
+        let stream_info = if matches!(self.selected_option().action, ViewAction::Streaming(_)) {
+            Some(match self.plot_state.as_ref() {
+                Some(PlotState::Streaming(state)) => (
+                    state.status(),
+                    state.progress(),
+                    state.error().map(str::to_owned),
+                ),
+                Some(PlotState::Immediate(Err(error))) => {
+                    (StreamStatus::Failed, None, Some(error.to_string()))
+                }
+                _ => (StreamStatus::Ready, None, None),
+            })
+        } else {
+            None
+        };
+
+        egui::containers::Sides::new().shrink_left().show(
+            ui,
+            |ui| {
+                ui.scope(|ui| {
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+
+                    egui::ScrollArea::horizontal()
+                        .id_salt(("plot-app-controls", self.selected_view))
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| self.draw_controls(ui))
+                        .inner
+                })
+                .inner
+            },
+            |ui| {
+                #[cfg(feature = "streaming")]
+                {
+                    stream_info.and_then(|(status, progress, error)| {
+                        Self::draw_stream_controls(ui, status, progress, error.as_deref())
+                    })
+                }
+                #[cfg(not(feature = "streaming"))]
+                {
+                    let _ = ui;
+                    None
+                }
+            },
+        )
+    }
+
+    #[cfg(feature = "streaming")]
+    fn draw_stream_controls(
+        ui: &mut Ui,
+        status: StreamStatus,
+        progress: Option<f32>,
+        error: Option<&str>,
+    ) -> Option<StreamCommand> {
+        let command = match status {
+            StreamStatus::Running => ui.button("Stop").clicked().then_some(StreamCommand::Stop),
+            StreamStatus::Stopping => {
+                ui.add_enabled(false, egui::Button::new("Stop"));
+                None
+            }
+            StreamStatus::Ready
+            | StreamStatus::Stopped
+            | StreamStatus::Finished
+            | StreamStatus::Failed => ui.button("Start").clicked().then_some(StreamCommand::Start),
+        };
+        if let Some(progress) = progress {
+            ui.add(
+                egui::ProgressBar::new(progress)
+                    .show_percentage()
+                    .desired_width(90.0)
+                    .animate(status == StreamStatus::Running),
+            );
+        }
+        if let Some(error) = error {
+            ui.colored_label(ui.visuals().error_fg_color, status.label())
+                .on_hover_text(error);
+        } else {
+            ui.label(status.label());
+        }
+        command
+    }
+
+    fn prepare_plot(&mut self) {
         let action = self.selected_option().action;
         self.plot_state = None;
-        #[cfg(feature = "streaming")]
-        {
-            self.pending_stream_restart = None;
-        }
         match action {
             ViewAction::Immediate(plot) => {
                 let (result, compute_time) = timed(|| plot(&mut self.params));
@@ -599,7 +620,7 @@ where
                 let (result, _) = timed(|| stream(&mut self.params));
                 self.compute_time = None;
                 self.plot_state = Some(match result {
-                    Ok(plan) => PlotState::Streaming(StreamState::start(plan)),
+                    Ok(plan) => PlotState::Streaming(StreamState::prepare(plan)),
                     Err(error) => PlotState::Immediate(Err(error)),
                 });
             }
@@ -643,29 +664,14 @@ where
     }
 
     #[cfg(feature = "streaming")]
-    fn selected_is_streaming(&self) -> bool {
-        matches!(self.selected_option().action, ViewAction::Streaming(_))
-    }
-
-    #[cfg(not(feature = "streaming"))]
-    fn selected_is_streaming(&self) -> bool {
-        false
-    }
-
-    #[cfg(feature = "streaming")]
-    fn maintain_stream(&mut self, context: &egui::Context) {
+    fn maintain_stream(&mut self, _context: &egui::Context) {
         if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
+            let previous_status = state.status();
             state.drain();
-        }
-
-        let Some(restart_at) = self.pending_stream_restart else {
-            return;
-        };
-        let now = Instant::now();
-        if now >= restart_at {
-            self.recompute_plot();
-        } else {
-            context.request_repaint_after(restart_at - now);
+            if previous_status != StreamStatus::Finished && state.status() == StreamStatus::Finished
+            {
+                self.compute_time = Some(state.elapsed());
+            }
         }
     }
 
@@ -673,19 +679,22 @@ where
     fn maintain_stream(&mut self, _context: &egui::Context) {}
 
     #[cfg(feature = "streaming")]
-    fn schedule_stream_restart(&mut self, context: &egui::Context) {
-        const RESTART_DELAY: Duration = Duration::from_millis(150);
-
-        if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
-            state.mark_restart_pending();
+    fn start_stream(&mut self) {
+        let is_ready = matches!(
+            self.plot_state.as_ref(),
+            Some(PlotState::Streaming(state)) if state.status() == StreamStatus::Ready
+        );
+        if !is_ready {
+            self.prepare_plot();
         }
-        self.pending_stream_restart = Some(Instant::now() + RESTART_DELAY);
-        context.request_repaint_after(RESTART_DELAY);
+        if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
+            self.compute_time = None;
+            state.start();
+        }
     }
 
     #[cfg(feature = "streaming")]
     fn stop_stream(&mut self) {
-        self.pending_stream_restart = None;
         if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
             state.stop();
         }
@@ -697,7 +706,7 @@ where
             PlotState::Streaming(state) => state.needs_repaint_poll(),
             PlotState::Immediate(_) => false,
         });
-        if live_stream || self.pending_stream_restart.is_some() {
+        if live_stream {
             context.request_repaint_after(STREAM_REPAINT_INTERVAL);
         }
     }
@@ -729,7 +738,7 @@ where
 {
     pub(crate) fn show_ui(&mut self, ui: &mut Ui) {
         self.maintain_stream(ui.ctx());
-        let (view_changed, reset_requested, save_requested, stream_command) = self.draw_header(ui);
+        let (view_changed, reset_requested, save_requested) = self.draw_header(ui);
         if reset_requested {
             self.reset(ui);
         }
@@ -740,34 +749,23 @@ where
         // plot titles and legends, the plot itself, and its summary panel.
         let capture_rect = ui.available_rect_before_wrap();
 
-        let controls_changed = ui
-            .scope(|ui| {
-                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        let (controls_changed, stream_command) = self.draw_control_row(ui);
 
-                egui::ScrollArea::horizontal()
-                    .id_salt(("plot-app-controls", self.selected_view))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| self.draw_controls(ui))
-                    .inner
-            })
-            .inner;
+        let needs_preparation =
+            view_changed || reset_requested || controls_changed || self.plot_state.is_none();
+        if needs_preparation {
+            self.prepare_plot();
+            ui.ctx().request_repaint();
+        }
 
-        let needs_immediate_recompute =
-            view_changed || reset_requested || self.plot_state.is_none();
-        if needs_immediate_recompute || matches!(stream_command, Some(StreamCommand::Start)) {
-            self.recompute_plot();
+        if matches!(stream_command, Some(StreamCommand::Start)) {
+            #[cfg(feature = "streaming")]
+            self.start_stream();
             ui.ctx().request_repaint();
         } else if matches!(stream_command, Some(StreamCommand::Stop)) {
             #[cfg(feature = "streaming")]
             self.stop_stream();
-        } else if controls_changed {
-            if self.selected_is_streaming() {
-                #[cfg(feature = "streaming")]
-                self.schedule_stream_restart(ui.ctx());
-            } else {
-                self.recompute_plot();
-                ui.ctx().request_repaint();
-            }
+            ui.ctx().request_repaint();
         }
 
         ui.separator();

@@ -11,6 +11,8 @@ use web_time::Instant;
 
 const UPDATE_QUEUE_CAPACITY: usize = 64;
 
+type StreamJob = Box<dyn FnOnce(StreamContext) -> StreamResult + Send + 'static>;
+
 /// The result returned by a streaming computation.
 pub type StreamResult<T = ()> = Result<T, StreamError>;
 
@@ -20,7 +22,7 @@ pub type StreamError = Box<dyn Error + Send + Sync + 'static>;
 /// A formatted plot and the background computation that will update it.
 pub struct StreamPlan {
     plotter: Plotter,
-    job: Box<dyn FnOnce(StreamContext) -> StreamResult + Send + 'static>,
+    job: StreamJob,
 }
 
 impl StreamPlan {
@@ -36,12 +38,7 @@ impl StreamPlan {
         }
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Plotter,
-        Box<dyn FnOnce(StreamContext) -> StreamResult + Send + 'static>,
-    ) {
+    pub(crate) fn into_parts(self) -> (Plotter, StreamJob) {
         (self.plotter, self.job)
     }
 }
@@ -145,7 +142,7 @@ enum StreamUpdate {
     Replace(SeriesId, Points),
     Clear(SeriesId),
     Progress(f32),
-    Finished(JobOutcome),
+    Finished(JobOutcome, Duration),
 }
 
 enum JobOutcome {
@@ -156,8 +153,8 @@ enum JobOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StreamStatus {
+    Ready,
     Running,
-    RestartPending,
     Stopping,
     Stopped,
     Finished,
@@ -167,8 +164,8 @@ pub(crate) enum StreamStatus {
 impl StreamStatus {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Ready => "Ready",
             Self::Running => "Running",
-            Self::RestartPending => "Restart pending",
             Self::Stopping => "Stopping",
             Self::Stopped => "Stopped",
             Self::Finished => "Finished",
@@ -179,18 +176,36 @@ impl StreamStatus {
 
 pub(crate) struct StreamState {
     pub(crate) plotter: Plotter,
+    job: Option<StreamJob>,
     updates: Option<Receiver<StreamUpdate>>,
-    cancel: CancelFlag,
+    cancel: Option<CancelFlag>,
     status: StreamStatus,
     progress: Option<f32>,
-    started: Instant,
+    started: Option<Instant>,
     elapsed: Duration,
     error: Option<String>,
 }
 
 impl StreamState {
-    pub(crate) fn start(plan: StreamPlan) -> Self {
+    pub(crate) fn prepare(plan: StreamPlan) -> Self {
         let (plotter, job) = plan.into_parts();
+        Self {
+            plotter,
+            job: Some(job),
+            updates: None,
+            cancel: None,
+            status: StreamStatus::Ready,
+            progress: None,
+            started: None,
+            elapsed: Duration::ZERO,
+            error: None,
+        }
+    }
+
+    pub(crate) fn start(&mut self) {
+        let Some(job) = self.job.take() else {
+            return;
+        };
         let (sender, receiver) = mpsc::sync_channel(UPDATE_QUEUE_CAPACITY);
         let cancel = CancelFlag::new();
         let worker_cancel = cancel.clone();
@@ -199,31 +214,30 @@ impl StreamState {
             updates: sender,
             cancel: worker_cancel,
         };
-        let mut state = Self {
-            plotter,
-            updates: Some(receiver),
-            cancel,
-            status: StreamStatus::Running,
-            progress: None,
-            started: Instant::now(),
-            elapsed: Duration::ZERO,
-            error: None,
-        };
+        self.updates = Some(receiver);
+        self.cancel = Some(cancel);
+        self.status = StreamStatus::Running;
+        self.progress = None;
+        self.started = Some(Instant::now());
+        self.elapsed = Duration::ZERO;
+        self.error = None;
 
         let result = spawn_compute(move || {
+            let started = Instant::now();
             let outcome = match job(context) {
                 Ok(()) => JobOutcome::Completed,
                 Err(error) if error.is::<StreamStopped>() => JobOutcome::Stopped,
                 Err(error) => JobOutcome::Failed(error.to_string()),
             };
-            let _ = worker_sender.send(StreamUpdate::Finished(outcome));
+            let _ = worker_sender.send(StreamUpdate::Finished(outcome, started.elapsed()));
         });
         if let Err(error) = result {
-            state.updates = None;
-            state.status = StreamStatus::Failed;
-            state.error = Some(error);
+            self.updates = None;
+            self.cancel = None;
+            self.started = None;
+            self.status = StreamStatus::Failed;
+            self.error = Some(error);
         }
-        state
     }
 
     pub(crate) fn drain(&mut self) {
@@ -241,7 +255,6 @@ impl StreamState {
 
         let mut finished = false;
         for update in updates {
-            self.elapsed = self.started.elapsed();
             match update {
                 StreamUpdate::Append(series, points) => {
                     self.plotter.append_points(series, points);
@@ -253,10 +266,13 @@ impl StreamState {
                     self.plotter.clear_points(series);
                 }
                 StreamUpdate::Progress(progress) => self.progress = Some(progress),
-                StreamUpdate::Finished(outcome) => {
+                StreamUpdate::Finished(outcome, elapsed) => {
                     finished = true;
+                    self.elapsed = elapsed;
                     match outcome {
-                        JobOutcome::Completed if self.cancel.is_cancelled() => {
+                        JobOutcome::Completed
+                            if self.cancel.as_ref().is_some_and(CancelFlag::is_cancelled) =>
+                        {
                             self.status = StreamStatus::Stopped;
                         }
                         JobOutcome::Completed => {
@@ -275,26 +291,25 @@ impl StreamState {
 
         if finished {
             self.updates = None;
+            self.cancel = None;
+            self.started = None;
         } else if disconnected {
             self.updates = None;
+            self.cancel = None;
             self.status = StreamStatus::Failed;
             self.error = Some("the computation ended without a final status".to_owned());
-            self.elapsed = self.started.elapsed();
+            self.elapsed = self
+                .started
+                .take()
+                .map_or(Duration::ZERO, |started| started.elapsed());
         }
     }
 
     pub(crate) fn stop(&mut self) {
-        self.cancel.cancel();
-        if self.updates.is_some() {
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
             self.status = StreamStatus::Stopping;
-        } else {
-            self.status = StreamStatus::Stopped;
         }
-    }
-
-    pub(crate) fn mark_restart_pending(&mut self) {
-        self.cancel.cancel();
-        self.status = StreamStatus::RestartPending;
     }
 
     pub(crate) fn status(&self) -> StreamStatus {
@@ -313,13 +328,6 @@ impl StreamState {
         self.error.as_deref()
     }
 
-    pub(crate) fn can_stop(&self) -> bool {
-        matches!(
-            self.status,
-            StreamStatus::Running | StreamStatus::RestartPending
-        )
-    }
-
     pub(crate) fn needs_repaint_poll(&self) -> bool {
         self.updates.is_some()
     }
@@ -327,7 +335,9 @@ impl StreamState {
 
 impl Drop for StreamState {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
     }
 }
 
@@ -356,6 +366,32 @@ mod tests {
         (plot, series)
     }
 
+    fn start(plan: StreamPlan) -> StreamState {
+        let mut state = StreamState::prepare(plan);
+        state.start();
+        state
+    }
+
+    #[test]
+    fn prepared_stream_does_not_run_until_started() {
+        let (plot, _) = plot_with_series();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let plan = StreamPlan::new(plot, move |_| {
+            started_sender.send(()).unwrap();
+            Ok(())
+        });
+        let mut state = StreamState::prepare(plan);
+
+        assert_eq!(state.status(), StreamStatus::Ready);
+        assert!(!state.needs_repaint_poll());
+        assert_eq!(started_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+
+        state.start();
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+    }
+
     #[test]
     fn stream_applies_all_update_kinds_and_finishes() {
         let (plot, series) = plot_with_series();
@@ -367,7 +403,7 @@ mod tests {
             stream.set_progress(0.75)?;
             Ok(())
         });
-        let mut state = StreamState::start(plan);
+        let mut state = start(plan);
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
@@ -391,7 +427,7 @@ mod tests {
                 std::thread::yield_now();
             }
         });
-        let mut state = StreamState::start(plan);
+        let mut state = start(plan);
         state.stop();
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -418,7 +454,7 @@ mod tests {
                 std::iter::once_with(|| panic!("cancelled append consumed its points")),
             )
         });
-        let mut state = StreamState::start(plan);
+        let mut state = start(plan);
         state.stop();
         release_sender.send(()).unwrap();
 
@@ -443,7 +479,7 @@ mod tests {
             release_receiver.recv().unwrap();
             Err(std::io::Error::other("calculation failed").into())
         });
-        let mut state = StreamState::start(plan);
+        let mut state = start(plan);
         state.stop();
         release_sender.send(()).unwrap();
 
@@ -467,7 +503,7 @@ mod tests {
             stream.append(series, [[0.0, 1.0]])?;
             Err(std::io::Error::other("calculation failed").into())
         });
-        let mut state = StreamState::start(plan);
+        let mut state = start(plan);
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
