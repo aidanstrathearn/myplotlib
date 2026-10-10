@@ -116,7 +116,13 @@ fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
     });
     assert!(contains_text_starting_with(&ready, "Ready"));
     assert_eq!(RUNS.load(Ordering::Relaxed), 0);
-    let start = text_position(&ready, "Start");
+    frame_time += 0.01;
+    let ready_with_timing = context.run(input(frame_time), |context| {
+        app.update(context, &mut frame);
+    });
+    assert!(contains_text_starting_with(&ready_with_timing, "Compute: "));
+    assert_eq!(RUNS.load(Ordering::Relaxed), 0);
+    let start = text_position(&ready_with_timing, "Start");
     frame_time += 0.01;
     let _ = context.run(pointer_input(frame_time, start, true), |context| {
         app.update(context, &mut frame);
@@ -262,6 +268,8 @@ fn active_stream_schedules_ui_thread_repaints() {
     }
     assert!(repaint_delay(&output) > Duration::ZERO);
     assert!(repaint_delay(&output) <= Duration::from_millis(33));
+    assert!(contains_text_starting_with(&output, "Running"));
+    assert!(contains_text_starting_with(&output, "Compute: "));
 
     drop(app);
     let deadline = Instant::now() + Duration::from_secs(1);

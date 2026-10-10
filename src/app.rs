@@ -617,8 +617,8 @@ where
             }
             #[cfg(feature = "streaming")]
             ViewAction::Streaming(stream) => {
-                let (result, _) = timed(|| stream(&mut self.params));
-                self.compute_time = None;
+                let (result, compute_time) = timed(|| stream(&mut self.params));
+                self.compute_time = Some(compute_time);
                 self.plot_state = Some(match result {
                     Ok(plan) => PlotState::Streaming(StreamState::prepare(plan)),
                     Err(error) => PlotState::Immediate(Err(error)),
@@ -688,7 +688,6 @@ where
             self.prepare_plot();
         }
         if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
-            self.compute_time = None;
             state.start();
         }
     }
