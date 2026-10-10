@@ -102,7 +102,7 @@ fn calculate_monte_carlo(target_samples: u64, series: SeriesId, stream: Context)
         let estimate = next_estimate(&mut generator, &mut inside_circle, completed);
 
         if completed % trace_interval == 0 || completed == target_samples {
-            points.push([completed as f64, (estimate - PI).abs().powi(2)]);
+            points.push([completed as f64, estimate]);
 
             if points.len() >= MAX_BATCH_POINTS || last_publish.elapsed() >= MAX_BATCH_AGE {
                 let batch = std::mem::replace(&mut points, Vec::with_capacity(MAX_BATCH_POINTS));
