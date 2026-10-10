@@ -43,5 +43,7 @@ Then open <http://127.0.0.1:8080/>.
 
 Native streaming uses a dedicated standard thread. Web streaming uses the Rayon
 Web Worker pool initialized by the generated site. Both workers send owned
-point batches to the UI, which applies them through `SeriesId`; workers never
-mutate the `Plotter` or egui state directly.
+point batches to the UI, which applies them through `SeriesId`. A stream can
+also queue application-parameter mutations with `StreamContext::update_params`;
+the UI applies them before drawing controls. Workers never mutate the `Plotter`,
+application parameters, or egui state directly.

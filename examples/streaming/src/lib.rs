@@ -36,6 +36,9 @@ struct Params {
     voigt_steps: usize,
 }
 
+type PlanResult = StreamPlanResult<Params>;
+type Context = StreamContext<Params>;
+
 impl Default for Params {
     fn default() -> Self {
         Self {
@@ -88,11 +91,7 @@ fn next_estimate(generator: &mut XorShift64, inside_circle: &mut u64, completed:
     4.0 * *inside_circle as f64 / completed as f64
 }
 
-fn calculate_monte_carlo(
-    target_samples: u64,
-    series: SeriesId,
-    stream: StreamContext,
-) -> StreamResult {
+fn calculate_monte_carlo(target_samples: u64, series: SeriesId, stream: Context) -> StreamResult {
     let trace_interval = (target_samples / TARGET_TRACE_POINTS).max(1);
     let mut last_publish = Instant::now();
     let mut generator = XorShift64::new(0x4d59_5df4_d0f3_3173 ^ target_samples);
@@ -103,7 +102,7 @@ fn calculate_monte_carlo(
         let estimate = next_estimate(&mut generator, &mut inside_circle, completed);
 
         if completed % trace_interval == 0 || completed == target_samples {
-            points.push([completed as f64, estimate]);
+            points.push([completed as f64, (estimate - PI).abs().powi(2)]);
 
             if points.len() >= MAX_BATCH_POINTS || last_publish.elapsed() >= MAX_BATCH_AGE {
                 let batch = std::mem::replace(&mut points, Vec::with_capacity(MAX_BATCH_POINTS));
@@ -121,7 +120,7 @@ fn calculate_monte_carlo(
     Ok(())
 }
 
-fn monte_carlo(params: &mut Params) -> StreamPlanResult {
+fn monte_carlo(params: &mut Params) -> PlanResult {
     let target_samples = params.target_samples;
     let mut plot = Plotter::new();
     let estimate = plot
@@ -198,7 +197,7 @@ fn calculate_voigt(
     gamma: f64,
     steps: usize,
     series: SeriesId,
-    stream: StreamContext,
+    stream: Context,
 ) -> StreamResult {
     let sample_count = 2 * steps + 1;
     let mut accumulated: Vec<_> = x_values.iter().map(|&x| gaussian(x, sigma)).collect();
@@ -225,7 +224,7 @@ fn calculate_voigt(
     Ok(())
 }
 
-fn voigt(params: &mut Params) -> StreamPlanResult {
+fn voigt(params: &mut Params) -> PlanResult {
     let sigma = params.gaussian_sigma;
     let gamma = params.lorentzian_gamma;
     let steps = params.voigt_steps;

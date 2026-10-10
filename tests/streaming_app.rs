@@ -2,7 +2,8 @@
 
 use eframe::egui;
 use myplotlib::{
-    App, AppDefinition, Plotter, SliderGrid, StreamPlan, StreamPlanResult, ViewOption,
+    App, AppDefinition, Plotter, Slider, SliderGrid, SliderGroup, StreamPlan, StreamPlanResult,
+    ViewOption,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -11,15 +12,19 @@ use web_time::Instant;
 static RUNS: AtomicUsize = AtomicUsize::new(0);
 static CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static POLL_CANCELLED: AtomicUsize = AtomicUsize::new(0);
+static UPDATE_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
+static UPDATE_RUNS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
 struct Params;
+
+type PlanResult = StreamPlanResult<Params>;
 
 fn controls(_: &mut Params) -> SliderGrid<'_> {
     SliderGrid::empty()
 }
 
-fn stream(_: &mut Params) -> StreamPlanResult {
+fn stream(_: &mut Params) -> PlanResult {
     let mut plot = Plotter::new();
     let series = plot.add_points(Vec::new()).label("Results").id();
     plot.title("Streaming signal");
@@ -155,7 +160,7 @@ fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
     assert_eq!(repaint_delay(&settled), Duration::MAX);
 }
 
-fn waiting_stream(_: &mut Params) -> StreamPlanResult {
+fn waiting_stream(_: &mut Params) -> PlanResult {
     let mut plot = Plotter::new();
     plot.add_points(Vec::new());
     Ok(StreamPlan::new(plot, |stream| {
@@ -176,7 +181,7 @@ fn immediate(_: &mut Params) -> myplotlib::AppResult {
     Ok(plot)
 }
 
-fn polling_stream(_: &mut Params) -> StreamPlanResult {
+fn polling_stream(_: &mut Params) -> PlanResult {
     let mut plot = Plotter::new();
     plot.add_points(Vec::new());
     Ok(StreamPlan::new(plot, |stream| {
@@ -277,4 +282,86 @@ fn active_stream_schedules_ui_thread_repaints() {
         std::thread::yield_now();
     }
     assert_eq!(POLL_CANCELLED.load(Ordering::Relaxed), 1);
+}
+
+#[derive(Default)]
+struct UpdatingParams {
+    worker_value: u64,
+}
+
+fn updating_controls(params: &mut UpdatingParams) -> SliderGrid<'_> {
+    SliderGrid::new(
+        1,
+        [SliderGroup::new(
+            "Worker state",
+            [Slider::new(
+                "Worker value",
+                &mut params.worker_value,
+                0..=100,
+            )],
+        )],
+    )
+}
+
+fn updating_stream(_: &mut UpdatingParams) -> StreamPlanResult<UpdatingParams> {
+    UPDATE_PREPARATIONS.fetch_add(1, Ordering::Relaxed);
+    let mut plot = Plotter::new();
+    plot.add_points(Vec::new());
+    Ok(StreamPlan::new(plot, |stream| {
+        UPDATE_RUNS.fetch_add(1, Ordering::Relaxed);
+        stream.update_params(|params: &mut UpdatingParams| params.worker_value = 42)?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn stream_parameter_updates_move_controls_without_preparing_again() {
+    use eframe::App as _;
+
+    UPDATE_PREPARATIONS.store(0, Ordering::Relaxed);
+    UPDATE_RUNS.store(0, Ordering::Relaxed);
+    const VIEWS: &[ViewOption<UpdatingParams>] = &[ViewOption::streaming(
+        "Stream",
+        updating_stream,
+        updating_controls,
+    )];
+    let context = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(context.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut frame_time = 0.0;
+
+    let _ = context.run(input(frame_time), |context| app.update(context, &mut frame));
+    frame_time += 0.01;
+    let ready = context.run(input(frame_time), |context| app.update(context, &mut frame));
+    assert!(contains_text_starting_with(&ready, "Worker value"));
+    assert!(contains_text_starting_with(&ready, "0"));
+    assert_eq!(UPDATE_PREPARATIONS.load(Ordering::Relaxed), 1);
+
+    let start = text_position(&ready, "Start");
+    frame_time += 0.01;
+    let _ = context.run(pointer_input(frame_time, start, true), |context| {
+        app.update(context, &mut frame)
+    });
+    frame_time += 0.01;
+    let _ = context.run(pointer_input(frame_time, start, false), |context| {
+        app.update(context, &mut frame)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut updated = false;
+    while Instant::now() < deadline {
+        frame_time += 0.01;
+        let output = context.run(input(frame_time), |context| app.update(context, &mut frame));
+        updated = contains_text_starting_with(&output, "42")
+            && contains_text_starting_with(&output, "Finished");
+        if updated {
+            break;
+        }
+        std::thread::yield_now();
+    }
+
+    assert!(updated);
+    assert_eq!(UPDATE_RUNS.load(Ordering::Relaxed), 1);
+    assert_eq!(UPDATE_PREPARATIONS.load(Ordering::Relaxed), 1);
 }

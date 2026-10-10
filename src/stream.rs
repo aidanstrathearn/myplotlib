@@ -11,7 +11,8 @@ use web_time::Instant;
 
 const UPDATE_QUEUE_CAPACITY: usize = 64;
 
-type StreamJob = Box<dyn FnOnce(StreamContext) -> StreamResult + Send + 'static>;
+type ParamUpdate<P> = Box<dyn FnOnce(&mut P) + Send + 'static>;
+type StreamJob<P> = Box<dyn FnOnce(StreamContext<P>) -> StreamResult + Send + 'static>;
 
 /// The result returned by a streaming computation.
 pub type StreamResult<T = ()> = Result<T, StreamError>;
@@ -20,17 +21,17 @@ pub type StreamResult<T = ()> = Result<T, StreamError>;
 pub type StreamError = Box<dyn Error + Send + Sync + 'static>;
 
 /// A formatted plot and the background computation that will update it.
-pub struct StreamPlan {
+pub struct StreamPlan<P> {
     plotter: Plotter,
-    job: StreamJob,
+    job: StreamJob<P>,
 }
 
-impl StreamPlan {
+impl<P: 'static> StreamPlan<P> {
     /// Creates a stream whose plot stays on the UI thread while `job` runs in
     /// the background.
     pub fn new(
         plotter: Plotter,
-        job: impl FnOnce(StreamContext) -> StreamResult + Send + 'static,
+        job: impl FnOnce(StreamContext<P>) -> StreamResult + Send + 'static,
     ) -> Self {
         Self {
             plotter,
@@ -38,7 +39,7 @@ impl StreamPlan {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (Plotter, StreamJob) {
+    pub(crate) fn into_parts(self) -> (Plotter, StreamJob<P>) {
         (self.plotter, self.job)
     }
 }
@@ -84,13 +85,21 @@ impl Error for StreamStopped {}
 // worker-side request_repaint can contend with the UI's parking_lot locks and
 // panic because parking is unsupported. App polls this queue and schedules the
 // next repaint from the UI thread instead.
-#[derive(Clone)]
-pub struct StreamContext {
-    updates: SyncSender<StreamUpdate>,
+pub struct StreamContext<P> {
+    updates: SyncSender<StreamUpdate<P>>,
     cancel: CancelFlag,
 }
 
-impl StreamContext {
+impl<P> Clone for StreamContext<P> {
+    fn clone(&self) -> Self {
+        Self {
+            updates: self.updates.clone(),
+            cancel: self.cancel.clone(),
+        }
+    }
+}
+
+impl<P: 'static> StreamContext<P> {
     /// Appends a batch of points to a series.
     pub fn append(
         &self,
@@ -116,6 +125,24 @@ impl StreamContext {
         self.send(StreamUpdate::Progress(progress.clamp(0.0, 1.0)))
     }
 
+    /// Applies a mutation to the application parameters on the UI thread.
+    ///
+    /// Group related values into one update and publish at display cadence.
+    /// Programmatic changes are visible to controls on the next frame without
+    /// being treated as user input.
+    ///
+    /// The closure parameter can name the application's parameter type when it
+    /// is needed for type inference:
+    ///
+    /// ```ignore
+    /// stream.update_params(|params: &mut Params| {
+    ///     params.latest_value = value;
+    /// })?;
+    /// ```
+    pub fn update_params(&self, update: impl FnOnce(&mut P) + Send + 'static) -> StreamResult {
+        self.send(StreamUpdate::UpdateParams(Box::new(update)))
+    }
+
     /// Stops the job promptly if the app has cancelled it.
     ///
     /// Update methods perform this check automatically. Call `checkpoint`
@@ -129,7 +156,7 @@ impl StreamContext {
         }
     }
 
-    fn send(&self, update: StreamUpdate) -> StreamResult {
+    fn send(&self, update: StreamUpdate<P>) -> StreamResult {
         self.checkpoint()?;
         self.updates
             .send(update)
@@ -137,11 +164,12 @@ impl StreamContext {
     }
 }
 
-enum StreamUpdate {
+enum StreamUpdate<P> {
     Append(SeriesId, Points),
     Replace(SeriesId, Points),
     Clear(SeriesId),
     Progress(f32),
+    UpdateParams(ParamUpdate<P>),
     Finished(JobOutcome, Duration),
 }
 
@@ -174,10 +202,10 @@ impl StreamStatus {
     }
 }
 
-pub(crate) struct StreamState {
+pub(crate) struct StreamState<P> {
     pub(crate) plotter: Plotter,
-    job: Option<StreamJob>,
-    updates: Option<Receiver<StreamUpdate>>,
+    job: Option<StreamJob<P>>,
+    updates: Option<Receiver<StreamUpdate<P>>>,
     cancel: Option<CancelFlag>,
     status: StreamStatus,
     progress: Option<f32>,
@@ -186,8 +214,8 @@ pub(crate) struct StreamState {
     error: Option<String>,
 }
 
-impl StreamState {
-    pub(crate) fn prepare(plan: StreamPlan) -> Self {
+impl<P: 'static> StreamState<P> {
+    pub(crate) fn prepare(plan: StreamPlan<P>) -> Self {
         let (plotter, job) = plan.into_parts();
         Self {
             plotter,
@@ -240,7 +268,7 @@ impl StreamState {
         }
     }
 
-    pub(crate) fn drain(&mut self) {
+    pub(crate) fn drain(&mut self, params: &mut P) {
         let Some(receiver) = &self.updates else {
             return;
         };
@@ -266,6 +294,7 @@ impl StreamState {
                     self.plotter.clear_points(series);
                 }
                 StreamUpdate::Progress(progress) => self.progress = Some(progress),
+                StreamUpdate::UpdateParams(update) => update(params),
                 StreamUpdate::Finished(outcome, elapsed) => {
                     finished = true;
                     self.elapsed = elapsed;
@@ -333,7 +362,7 @@ impl StreamState {
     }
 }
 
-impl Drop for StreamState {
+impl<P> Drop for StreamState<P> {
     fn drop(&mut self) {
         if let Some(cancel) = &self.cancel {
             cancel.cancel();
@@ -366,7 +395,7 @@ mod tests {
         (plot, series)
     }
 
-    fn start(plan: StreamPlan) -> StreamState {
+    fn start(plan: StreamPlan<()>) -> StreamState<()> {
         let mut state = StreamState::prepare(plan);
         state.start();
         state
@@ -376,7 +405,7 @@ mod tests {
     fn prepared_stream_does_not_run_until_started() {
         let (plot, _) = plot_with_series();
         let (started_sender, started_receiver) = mpsc::channel();
-        let plan = StreamPlan::new(plot, move |_| {
+        let plan = StreamPlan::<()>::new(plot, move |_| {
             started_sender.send(()).unwrap();
             Ok(())
         });
@@ -390,6 +419,54 @@ mod tests {
         started_receiver
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
+    }
+
+    #[test]
+    fn parameter_updates_are_applied_only_when_the_ui_drains_them() {
+        #[derive(Default, Debug, PartialEq, Eq)]
+        struct Params {
+            _ui_only: std::rc::Rc<()>,
+            value: usize,
+            updates: usize,
+        }
+
+        let (plot, _) = plot_with_series();
+        let (published_sender, published_receiver) = mpsc::channel();
+        let plan = StreamPlan::<Params>::new(plot, move |stream| {
+            stream.update_params(|params| {
+                params.value = 42;
+                params.updates += 1;
+            })?;
+            published_sender.send(()).unwrap();
+            Ok(())
+        });
+        let mut state = StreamState::prepare(plan);
+        let mut params = Params::default();
+        state.start();
+
+        published_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(params, Params::default());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            state.drain(&mut params);
+            if state.status() == StreamStatus::Finished {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        assert_eq!(
+            params,
+            Params {
+                value: 42,
+                updates: 1,
+                ..Params::default()
+            }
+        );
+        assert_eq!(state.status(), StreamStatus::Finished);
     }
 
     #[test]
@@ -407,7 +484,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            state.drain();
+            state.drain(&mut ());
             if state.status() == StreamStatus::Finished {
                 break;
             }
@@ -432,7 +509,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            state.drain();
+            state.drain(&mut ());
             if state.status() == StreamStatus::Stopped {
                 break;
             }
@@ -460,7 +537,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            state.drain();
+            state.drain(&mut ());
             if state.status() == StreamStatus::Stopped {
                 break;
             }
@@ -485,7 +562,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            state.drain();
+            state.drain(&mut ());
             if state.status() == StreamStatus::Failed {
                 break;
             }
@@ -507,7 +584,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            state.drain();
+            state.drain(&mut ());
             if state.status() == StreamStatus::Failed {
                 break;
             }

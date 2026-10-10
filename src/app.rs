@@ -14,9 +14,9 @@ pub type AppResult = std::result::Result<Plotter, AppError>;
 
 pub type PlotAction<P> = fn(&mut P) -> AppResult;
 #[cfg(feature = "streaming")]
-pub type StreamPlanResult = std::result::Result<crate::StreamPlan, AppError>;
+pub type StreamPlanResult<P> = std::result::Result<crate::StreamPlan<P>, AppError>;
 #[cfg(feature = "streaming")]
-pub type StreamAction<P> = fn(&mut P) -> StreamPlanResult;
+pub type StreamAction<P> = fn(&mut P) -> StreamPlanResult<P>;
 pub type ControlsAction<P> = for<'a> fn(&'a mut P) -> SliderGrid<'a>;
 
 #[cfg(feature = "streaming")]
@@ -175,23 +175,27 @@ pub struct App<P: 'static> {
     definition: AppDefinition<P>,
     selected_view: usize,
     params: P,
-    plot_state: Option<PlotState>,
+    plot_state: Option<PlotState<P>>,
     compute_time: Option<Duration>,
     view_ui: Vec<ViewUiState>,
     pending_drop_target: Option<(usize, usize)>,
 }
 
-enum PlotState {
-    Immediate(AppResult),
+enum PlotState<P> {
+    Immediate(AppResult, std::marker::PhantomData<fn() -> P>),
     #[cfg(feature = "streaming")]
-    Streaming(StreamState),
+    Streaming(StreamState<P>),
 }
 
-impl PlotState {
+impl<P> PlotState<P> {
+    fn immediate(result: AppResult) -> Self {
+        Self::Immediate(result, std::marker::PhantomData)
+    }
+
     fn plotter(&self) -> Option<&Plotter> {
         match self {
-            Self::Immediate(Ok(plotter)) => Some(plotter),
-            Self::Immediate(Err(_)) => None,
+            Self::Immediate(Ok(plotter), _) => Some(plotter),
+            Self::Immediate(Err(_), _) => None,
             #[cfg(feature = "streaming")]
             Self::Streaming(state) => Some(&state.plotter),
         }
@@ -532,7 +536,7 @@ where
                     state.progress(),
                     state.error().map(str::to_owned),
                 ),
-                Some(PlotState::Immediate(Err(error))) => {
+                Some(PlotState::Immediate(Err(error), _)) => {
                     (StreamStatus::Failed, None, Some(error.to_string()))
                 }
                 _ => (StreamStatus::Ready, None, None),
@@ -612,7 +616,7 @@ where
         match action {
             ViewAction::Immediate(plot) => {
                 let (result, compute_time) = timed(|| plot(&mut self.params));
-                self.plot_state = Some(PlotState::Immediate(result));
+                self.plot_state = Some(PlotState::immediate(result));
                 self.compute_time = Some(compute_time);
             }
             #[cfg(feature = "streaming")]
@@ -621,7 +625,7 @@ where
                 self.compute_time = Some(compute_time);
                 self.plot_state = Some(match result {
                     Ok(plan) => PlotState::Streaming(StreamState::prepare(plan)),
-                    Err(error) => PlotState::Immediate(Err(error)),
+                    Err(error) => PlotState::immediate(Err(error)),
                 });
             }
         }
@@ -630,11 +634,11 @@ where
     fn draw_plot(&mut self, ui: &mut Ui) -> Option<egui::Rect> {
         let selected_view = self.selected_view;
         match &self.plot_state {
-            Some(PlotState::Immediate(Ok(plotter))) => {
+            Some(PlotState::Immediate(Ok(plotter), _)) => {
                 let axes = &mut self.view_ui[selected_view].figure.axes[0];
                 Some(show_axes_ui(ui, plotter, axes, ("plot-app", selected_view)))
             }
-            Some(PlotState::Immediate(Err(error))) => {
+            Some(PlotState::Immediate(Err(error), _)) => {
                 ui.colored_label(ui.visuals().error_fg_color, error.to_string());
                 None
             }
@@ -667,7 +671,7 @@ where
     fn maintain_stream(&mut self, _context: &egui::Context) {
         if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
             let previous_status = state.status();
-            state.drain();
+            state.drain(&mut self.params);
             if previous_status != StreamStatus::Finished && state.status() == StreamStatus::Finished
             {
                 self.compute_time = Some(state.elapsed());
@@ -703,7 +707,7 @@ where
     fn schedule_stream_frame(&self, context: &egui::Context) {
         let live_stream = self.plot_state.as_ref().is_some_and(|state| match state {
             PlotState::Streaming(state) => state.needs_repaint_poll(),
-            PlotState::Immediate(_) => false,
+            PlotState::Immediate(_, _) => false,
         });
         if live_stream {
             context.request_repaint_after(STREAM_REPAINT_INTERVAL);
