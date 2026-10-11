@@ -12,6 +12,7 @@ use web_time::Instant;
 const UPDATE_QUEUE_CAPACITY: usize = 64;
 
 type ParamUpdate<P> = Box<dyn FnOnce(&mut P) + Send + 'static>;
+type PointBinding<P> = (SeriesId, Box<dyn Fn(&P) -> Points + 'static>);
 type StreamJob<P> = Box<dyn FnOnce(StreamContext<P>) -> StreamResult + Send + 'static>;
 
 /// The result returned by a streaming computation.
@@ -24,6 +25,7 @@ pub type StreamError = Box<dyn Error + Send + Sync + 'static>;
 pub struct StreamPlan<P> {
     plotter: Plotter,
     job: StreamJob<P>,
+    point_bindings: Vec<PointBinding<P>>,
 }
 
 impl<P: 'static> StreamPlan<P> {
@@ -36,11 +38,27 @@ impl<P: 'static> StreamPlan<P> {
         Self {
             plotter,
             job: Box::new(job),
+            point_bindings: Vec::new(),
         }
     }
 
-    pub(crate) fn into_parts(self) -> (Plotter, StreamJob<P>) {
-        (self.plotter, self.job)
+    /// Recomputes a series on the UI thread after streamed parameter updates.
+    ///
+    /// The plot should contain the series' initial points before it is passed
+    /// to [`Self::new`]. When the worker calls
+    /// [`StreamContext::update_params`], bindings are refreshed once after the
+    /// UI drains that batch of updates. The stream itself is not restarted.
+    pub fn bind_points(
+        mut self,
+        series: SeriesId,
+        points: impl Fn(&P) -> Points + 'static,
+    ) -> Self {
+        self.point_bindings.push((series, Box::new(points)));
+        self
+    }
+
+    pub(crate) fn into_parts(self) -> (Plotter, StreamJob<P>, Vec<PointBinding<P>>) {
+        (self.plotter, self.job, self.point_bindings)
     }
 }
 
@@ -205,6 +223,7 @@ impl StreamStatus {
 pub(crate) struct StreamState<P> {
     pub(crate) plotter: Plotter,
     job: Option<StreamJob<P>>,
+    point_bindings: Vec<PointBinding<P>>,
     updates: Option<Receiver<StreamUpdate<P>>>,
     cancel: Option<CancelFlag>,
     status: StreamStatus,
@@ -216,10 +235,11 @@ pub(crate) struct StreamState<P> {
 
 impl<P: 'static> StreamState<P> {
     pub(crate) fn prepare(plan: StreamPlan<P>) -> Self {
-        let (plotter, job) = plan.into_parts();
+        let (plotter, job, point_bindings) = plan.into_parts();
         Self {
             plotter,
             job: Some(job),
+            point_bindings,
             updates: None,
             cancel: None,
             status: StreamStatus::Ready,
@@ -282,6 +302,7 @@ impl<P: 'static> StreamState<P> {
         };
 
         let mut finished = false;
+        let mut params_updated = false;
         for update in updates {
             match update {
                 StreamUpdate::Append(series, points) => {
@@ -294,7 +315,10 @@ impl<P: 'static> StreamState<P> {
                     self.plotter.clear_points(series);
                 }
                 StreamUpdate::Progress(progress) => self.progress = Some(progress),
-                StreamUpdate::UpdateParams(update) => update(params),
+                StreamUpdate::UpdateParams(update) => {
+                    update(params);
+                    params_updated = true;
+                }
                 StreamUpdate::Finished(outcome, elapsed) => {
                     finished = true;
                     self.elapsed = elapsed;
@@ -315,6 +339,12 @@ impl<P: 'static> StreamState<P> {
                         }
                     }
                 }
+            }
+        }
+
+        if params_updated {
+            for (series, points) in &self.point_bindings {
+                self.plotter.replace_points(*series, points(params));
             }
         }
 
@@ -467,6 +497,62 @@ mod tests {
             }
         );
         assert_eq!(state.status(), StreamStatus::Finished);
+    }
+
+    #[test]
+    fn parameter_updates_refresh_bound_points_once_per_drain() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        #[derive(Default)]
+        struct Params {
+            value: usize,
+        }
+
+        let (plot, series) = plot_with_series();
+        let (published_sender, published_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let refreshes = Rc::new(Cell::new(0));
+        let observed_value = Rc::new(Cell::new(0));
+        let binding_refreshes = refreshes.clone();
+        let binding_value = observed_value.clone();
+        let plan = StreamPlan::<Params>::new(plot, move |stream| {
+            stream.update_params(|params| params.value = 1)?;
+            stream.update_params(|params| params.value = 2)?;
+            published_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+            Ok(())
+        })
+        .bind_points(series, move |params| {
+            binding_refreshes.set(binding_refreshes.get() + 1);
+            binding_value.set(params.value);
+            vec![[0.0, params.value as f64]]
+        });
+        let mut state = StreamState::prepare(plan);
+        let mut params = Params::default();
+        state.start();
+
+        published_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        state.drain(&mut params);
+
+        assert_eq!(params.value, 2);
+        assert_eq!(refreshes.get(), 1);
+        assert_eq!(observed_value.get(), 2);
+        assert_eq!(state.status(), StreamStatus::Running);
+
+        release_sender.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            state.drain(&mut params);
+            if state.status() == StreamStatus::Finished {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(state.status(), StreamStatus::Finished);
+        assert_eq!(refreshes.get(), 1);
     }
 
     #[test]

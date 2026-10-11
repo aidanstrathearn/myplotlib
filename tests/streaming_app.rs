@@ -14,6 +14,7 @@ static CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static POLL_CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static UPDATE_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
 static UPDATE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static UPDATE_BINDINGS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
 struct Params;
@@ -306,20 +307,25 @@ fn updating_controls(params: &mut UpdatingParams) -> SliderGrid<'_> {
 fn updating_stream(_: &mut UpdatingParams) -> StreamPlanResult<UpdatingParams> {
     UPDATE_PREPARATIONS.fetch_add(1, Ordering::Relaxed);
     let mut plot = Plotter::new();
-    plot.add_points(Vec::new());
+    let series = plot.add_points(Vec::new()).id();
     Ok(StreamPlan::new(plot, |stream| {
         UPDATE_RUNS.fetch_add(1, Ordering::Relaxed);
         stream.update_params(|params: &mut UpdatingParams| params.worker_value = 42)?;
         Ok(())
+    })
+    .bind_points(series, |params| {
+        UPDATE_BINDINGS.fetch_add(1, Ordering::Relaxed);
+        vec![[0.0, params.worker_value as f64]]
     }))
 }
 
 #[test]
-fn stream_parameter_updates_move_controls_without_preparing_again() {
+fn stream_parameter_updates_refresh_controls_and_bound_points_without_preparing_again() {
     use eframe::App as _;
 
     UPDATE_PREPARATIONS.store(0, Ordering::Relaxed);
     UPDATE_RUNS.store(0, Ordering::Relaxed);
+    UPDATE_BINDINGS.store(0, Ordering::Relaxed);
     const VIEWS: &[ViewOption<UpdatingParams>] = &[ViewOption::streaming(
         "Stream",
         updating_stream,
@@ -363,5 +369,6 @@ fn stream_parameter_updates_move_controls_without_preparing_again() {
 
     assert!(updated);
     assert_eq!(UPDATE_RUNS.load(Ordering::Relaxed), 1);
+    assert_eq!(UPDATE_BINDINGS.load(Ordering::Relaxed), 1);
     assert_eq!(UPDATE_PREPARATIONS.load(Ordering::Relaxed), 1);
 }

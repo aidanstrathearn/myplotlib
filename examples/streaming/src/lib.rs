@@ -305,7 +305,6 @@ struct VoigtCalculation {
     gamma: f64,
     steps: usize,
     partial_series: SeriesId,
-    fitted_series: SeriesId,
     fit_sigma: f64,
     fit_gamma: f64,
 }
@@ -317,7 +316,6 @@ fn calculate_voigt(calculation: VoigtCalculation, stream: Context) -> StreamResu
         gamma,
         steps,
         partial_series,
-        fitted_series,
         mut fit_sigma,
         mut fit_gamma,
     } = calculation;
@@ -346,7 +344,6 @@ fn calculate_voigt(calculation: VoigtCalculation, stream: Context) -> StreamResu
                 partial_series,
                 profile_points(&x_values, &accumulated, partial_samples),
             )?;
-            stream.replace(fitted_series, voigt_points(&x_values, fit_sigma, fit_gamma))?;
             stream.update_params(move |params: &mut Params| {
                 params.fit_sigma = fit_sigma;
                 params.fit_gamma = fit_gamma;
@@ -371,6 +368,7 @@ fn voigt(params: &mut Params) -> PlanResult {
         })
         .collect();
     let initial: Vec<_> = x_values.iter().map(|&x| [x, gaussian(x, sigma)]).collect();
+
     let fitted = voigt_points(&x_values, fit_sigma, fit_gamma);
     let target = voigt_points(&x_values, sigma, gamma);
 
@@ -386,6 +384,7 @@ fn voigt(params: &mut Params) -> PlanResult {
     plot.ylim(0.0, 1.1 * initial_peak);
     plot.add_summary("Integration samples", 2 * steps + 1);
 
+    let fitted_x_values = x_values.clone();
     Ok(StreamPlan::new(plot, move |stream| {
         calculate_voigt(
             VoigtCalculation {
@@ -394,12 +393,14 @@ fn voigt(params: &mut Params) -> PlanResult {
                 gamma,
                 steps,
                 partial_series: partial,
-                fitted_series: fitted,
                 fit_sigma,
                 fit_gamma,
             },
             stream,
         )
+    })
+    .bind_points(fitted, move |params| {
+        voigt_points(&fitted_x_values, params.fit_sigma, params.fit_gamma)
     }))
 }
 

@@ -4,9 +4,11 @@ This example demonstrates background calculations updating persistent plots. A
 Monte Carlo calculation appends batches to a growing trace, while a numerical
 Gaussian–Lorentzian convolution repeatedly replaces a complete trace as it
 evolves from a Gaussian into a Voigt profile. The convolution view also fits a
-Voigt profile to each published partial result, replaces a fitted trace, and
-uses `StreamContext::update_params` to drive fitted-width sliders toward the
-input widths. Both use
+Voigt profile to each published partial result and uses
+`StreamContext::update_params` to drive fitted-width sliders toward the input
+widths. The fitted trace is bound to those parameters with
+`StreamPlan::bind_points`, so the UI refreshes it without a second worker plot
+update. Both use
 `ViewOption::streaming`, `StreamPlan`, and `StreamContext`; the normal Myplotlib
 app owns the worker lifecycle and plot UI. A synchronous view plots the expected
 Monte Carlo error with `ViewOption::new`, showing that streaming and immediate
@@ -49,5 +51,6 @@ Native streaming uses a dedicated standard thread. Web streaming uses the Rayon
 Web Worker pool initialized by the generated site. Both workers send owned
 point batches to the UI, which applies them through `SeriesId`. A stream can
 also queue application-parameter mutations with `StreamContext::update_params`;
-the UI applies them before drawing controls. Workers never mutate the `Plotter`,
-application parameters, or egui state directly.
+the UI applies them before drawing controls and refreshes parameter-bound point
+series once per drained batch. Workers never mutate the `Plotter`, application
+parameters, or egui state directly.
