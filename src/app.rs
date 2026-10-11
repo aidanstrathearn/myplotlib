@@ -522,11 +522,6 @@ where
         self.pending_drop_target = None;
     }
 
-    fn draw_controls(&mut self, ui: &mut Ui) -> bool {
-        let controls = self.selected_option().controls;
-        controls(&mut self.params).show(ui)
-    }
-
     fn draw_control_row(&mut self, ui: &mut Ui) -> (bool, Option<StreamCommand>) {
         #[cfg(feature = "streaming")]
         let stream_info = if matches!(self.selected_option().action, ViewAction::Streaming(_)) {
@@ -545,34 +540,28 @@ where
             None
         };
 
-        egui::containers::Sides::new().shrink_left().show(
-            ui,
-            |ui| {
-                ui.scope(|ui| {
-                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        ui.scope(|ui| {
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
-                    egui::ScrollArea::horizontal()
-                        .id_salt(("plot-app-controls", self.selected_view))
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| self.draw_controls(ui))
-                        .inner
+            egui::ScrollArea::horizontal()
+                .id_salt(("plot-app-controls", self.selected_view))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let controls = self.selected_option().controls;
+                    let grid = controls(&mut self.params);
+
+                    #[cfg(feature = "streaming")]
+                    if let Some((status, progress, error)) = stream_info {
+                        return grid.show_with_trailing_group(ui, "Streaming", |ui| {
+                            Self::draw_stream_controls(ui, status, progress, error.as_deref())
+                        });
+                    }
+
+                    (grid.show(ui), None)
                 })
                 .inner
-            },
-            |ui| {
-                #[cfg(feature = "streaming")]
-                {
-                    stream_info.and_then(|(status, progress, error)| {
-                        Self::draw_stream_controls(ui, status, progress, error.as_deref())
-                    })
-                }
-                #[cfg(not(feature = "streaming"))]
-                {
-                    let _ = ui;
-                    None
-                }
-            },
-        )
+        })
+        .inner
     }
 
     #[cfg(feature = "streaming")]
@@ -582,31 +571,43 @@ where
         progress: Option<f32>,
         error: Option<&str>,
     ) -> Option<StreamCommand> {
-        let command = match status {
-            StreamStatus::Running => ui.button("Stop").clicked().then_some(StreamCommand::Stop),
-            StreamStatus::Stopping => {
-                ui.add_enabled(false, egui::Button::new("Stop"));
-                None
-            }
-            StreamStatus::Ready
-            | StreamStatus::Stopped
-            | StreamStatus::Finished
-            | StreamStatus::Failed => ui.button("Start").clicked().then_some(StreamCommand::Start),
-        };
-        if let Some(progress) = progress {
-            ui.add(
-                egui::ProgressBar::new(progress)
-                    .show_percentage()
-                    .desired_width(90.0)
-                    .animate(status == StreamStatus::Running),
-            );
-        }
-        if let Some(error) = error {
-            ui.colored_label(ui.visuals().error_fg_color, status.label())
-                .on_hover_text(error);
-        } else {
-            ui.label(status.label());
-        }
+        let command = ui
+            .horizontal(|ui| {
+                let command = match status {
+                    StreamStatus::Running => {
+                        ui.button("Stop").clicked().then_some(StreamCommand::Stop)
+                    }
+                    StreamStatus::Stopping => {
+                        ui.add_enabled(false, egui::Button::new("Stop"));
+                        None
+                    }
+                    StreamStatus::Ready
+                    | StreamStatus::Stopped
+                    | StreamStatus::Finished
+                    | StreamStatus::Failed => {
+                        ui.button("Start").clicked().then_some(StreamCommand::Start)
+                    }
+                };
+
+                if let Some(error) = error {
+                    ui.colored_label(ui.visuals().error_fg_color, status.label())
+                        .on_hover_text(error);
+                } else {
+                    ui.label(status.label());
+                }
+
+                command
+            })
+            .inner;
+
+        ui.add_visible(
+            progress.is_some(),
+            egui::ProgressBar::new(progress.unwrap_or_default())
+                .show_percentage()
+                .desired_width(120.0)
+                .animate(status == StreamStatus::Running),
+        );
+
         command
     }
 

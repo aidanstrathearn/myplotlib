@@ -120,6 +120,7 @@ fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
     let ready = context.run(input(frame_time), |context| {
         app.update(context, &mut frame);
     });
+    assert!(contains_text_starting_with(&ready, "Streaming"));
     assert!(contains_text_starting_with(&ready, "Ready"));
     assert_eq!(RUNS.load(Ordering::Relaxed), 0);
     frame_time += 0.01;
@@ -222,6 +223,7 @@ fn switching_views_cancels_the_previous_stream() {
         app.update(context, &mut frame);
     });
     assert!(contains_text_starting_with(&output, "Immediate signal"));
+    assert!(!contains_text_starting_with(&output, "Streaming"));
 
     let deadline = Instant::now() + Duration::from_secs(1);
     while CANCELLED.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
@@ -342,6 +344,7 @@ fn stream_parameter_updates_refresh_controls_and_bound_points_without_preparing_
     let ready = context.run(input(frame_time), |context| app.update(context, &mut frame));
     assert!(contains_text_starting_with(&ready, "Worker value"));
     assert!(contains_text_starting_with(&ready, "0"));
+    assert!(text_position(&ready, "Streaming").x > text_position(&ready, "Worker state").x);
     assert_eq!(UPDATE_PREPARATIONS.load(Ordering::Relaxed), 1);
 
     let start = text_position(&ready, "Start");

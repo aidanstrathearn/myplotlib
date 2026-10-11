@@ -89,9 +89,42 @@ impl<'a> SliderGrid<'a> {
             return false;
         }
 
+        self.show_with_optional_trailing_group(ui, |_| None::<()>).0
+    }
+
+    #[cfg(feature = "streaming")]
+    pub(crate) fn show_with_trailing_group<R>(
+        self,
+        ui: &mut Ui,
+        title: impl Into<RichText>,
+        add_contents: impl FnOnce(&mut Ui) -> R,
+    ) -> (bool, R) {
+        let title = title.into();
+        let (changed, result) = self.show_with_optional_trailing_group(ui, |ui| {
+            Some(
+                ui.vertical(|ui| {
+                    ui.heading(title);
+                    add_contents(ui)
+                })
+                .inner,
+            )
+        });
+
+        (
+            changed,
+            result.expect("the trailing slider group should be shown"),
+        )
+    }
+
+    fn show_with_optional_trailing_group<R>(
+        self,
+        ui: &mut Ui,
+        add_trailing_group: impl FnOnce(&mut Ui) -> Option<R>,
+    ) -> (bool, Option<R>) {
         let mut changed = false;
         let max_rows = self.max_rows;
         let grid_id = ui.id().with("plot-app-slider-grid");
+        let mut trailing_result = None;
 
         egui::Grid::new(grid_id).show(ui, |ui| {
             for (group_index, group) in self.groups.into_iter().enumerate() {
@@ -100,10 +133,11 @@ impl<'a> SliderGrid<'a> {
                     changed |= show_sliders(ui, grid_id.with(group_index), max_rows, group.sliders);
                 });
             }
+            trailing_result = add_trailing_group(ui);
             ui.end_row();
         });
 
-        changed
+        (changed, trailing_result)
     }
 }
 
