@@ -221,15 +221,28 @@ struct RenderData {
     vertical_lines: Vec<f64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeriesStyle {
+    Line,
+    Points,
+}
+
 pub struct PlotLine {
     id: SeriesId,
     points: Points,
     label: Option<String>,
+    style: SeriesStyle,
 }
 
 impl PlotLine {
     pub fn label(&mut self, label: impl Into<String>) -> &mut Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Renders this series as unconnected point markers.
+    pub fn points_only(&mut self) -> &mut Self {
+        self.style = SeriesStyle::Points;
         self
     }
 
@@ -300,6 +313,7 @@ impl Plotter {
             id,
             points,
             label: None,
+            style: SeriesStyle::Line,
         });
 
         self.series.last_mut().unwrap()
@@ -311,6 +325,7 @@ impl Plotter {
             id,
             points,
             label: None,
+            style: SeriesStyle::Line,
         });
 
         self.series.last_mut().unwrap()
@@ -429,7 +444,12 @@ impl Plotter {
         let series_segments = self
             .series
             .iter()
-            .map(|line| transform_line(&line.points, self.x_scale, self.y_scale))
+            .map(|series| match series.style {
+                SeriesStyle::Line => transform_line(&series.points, self.x_scale, self.y_scale),
+                SeriesStyle::Points => {
+                    vec![transform_points(&series.points, self.x_scale, self.y_scale)]
+                }
+            })
             .collect();
         let x_limits = self.x_limits.map(|(lower, upper)| {
             (
@@ -507,9 +527,20 @@ impl Plotter {
     }
 
     fn add_series(&self, plot_ui: &mut PlotUi<'_>, series_segments: Vec<Vec<Points>>) {
-        for (index, (line, segments)) in self.series.iter().zip(series_segments).enumerate() {
+        for (index, (series, segments)) in self.series.iter().zip(series_segments).enumerate() {
             let colour = MATPLOTLIB_COLORS[index % MATPLOTLIB_COLORS.len()];
-            let legend_name = line.label.as_deref().unwrap_or_default();
+            let legend_name = series.label.as_deref().unwrap_or_default();
+
+            if series.style == SeriesStyle::Points {
+                let points = segments.into_iter().flatten().collect::<Points>();
+                let markers = PlotMarkers::new(format!("series_{index}"), PlotPoints::from(points))
+                    .name(legend_name)
+                    .color(colour)
+                    .radius(DEFAULT_MARKER_RADIUS);
+                plot_ui.points(markers);
+                continue;
+            }
+
             let segment_count = segments.len();
 
             for (segment_index, points) in segments.into_iter().enumerate() {
@@ -741,6 +772,35 @@ mod tests {
 
         plot.clear_points(first);
         assert!(plot.series[first.0].points.is_empty());
+    }
+
+    #[test]
+    fn series_can_be_rendered_as_points_without_changing_its_identity() {
+        let mut plot = Plotter::new();
+        let series = plot.add_points(vec![[1.0, 2.0]]).points_only().id();
+
+        assert_eq!(plot.series[series.0].style, SeriesStyle::Points);
+
+        plot.replace_points(series, vec![[3.0, 4.0]]);
+
+        assert_eq!(plot.series[series.0].style, SeriesStyle::Points);
+        assert_eq!(plot.series[series.0].points, vec![[3.0, 4.0]]);
+    }
+
+    #[test]
+    fn point_series_filter_values_outside_logarithmic_axes() {
+        let mut plot = Plotter::new();
+        plot.add_points(vec![[1.0, 10.0], [10.0, 0.0], [100.0, 1000.0]])
+            .points_only();
+        plot.xscale(AxisScale::Log10);
+        plot.yscale(AxisScale::Log10);
+
+        let render_data = plot.transform_for_rendering();
+
+        assert_eq!(
+            render_data.series_segments,
+            vec![vec![vec![[0.0, 1.0], [2.0, 3.0]]]]
+        );
     }
 
     #[test]
