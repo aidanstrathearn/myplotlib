@@ -1,8 +1,8 @@
 use crate::{Points, data_import::ImportedSeries};
 use eframe::egui;
 use egui_plot::{
-    GridInput, GridMark, HLine, Legend, Line, LineStyle, Plot, PlotPoint, PlotPoints, PlotUi,
-    Points as PlotMarkers, VLine,
+    AxisHints, GridInput, GridMark, HLine, HPlacement, Legend, Line, LineStyle, Plot, PlotMemory,
+    PlotPoint, PlotPoints, PlotUi, Points as PlotMarkers, VLine,
 };
 use std::fmt::Display;
 
@@ -33,6 +33,68 @@ pub enum AxisScale {
     Linear,
     /// Positive values are plotted by their base-10 logarithm.
     Log10,
+}
+
+/// Side of a plot on which a y-axis is displayed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YAxisSide {
+    Left,
+    Right,
+}
+
+/// Identifies a y-axis within the [`Plotter`] that created it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct YAxisId(usize);
+
+impl YAxisId {
+    const PRIMARY: Self = Self(0);
+}
+
+/// Configuration for one y-axis.
+pub struct YAxis {
+    side: YAxisSide,
+    label: String,
+    limits: Option<(f64, f64)>,
+    limits_pending: std::cell::Cell<bool>,
+    scale: AxisScale,
+}
+
+impl YAxis {
+    fn primary() -> Self {
+        Self {
+            side: YAxisSide::Left,
+            label: String::new(),
+            limits: None,
+            limits_pending: std::cell::Cell::new(false),
+            scale: AxisScale::Linear,
+        }
+    }
+
+    fn new(side: YAxisSide) -> Self {
+        Self {
+            side,
+            ..Self::primary()
+        }
+    }
+
+    /// Sets the text displayed beside this axis.
+    pub fn label(&mut self, label: impl Into<String>) -> &mut Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Sets the initial and reset bounds for this axis.
+    pub fn limits(&mut self, lower: f64, upper: f64) -> &mut Self {
+        self.limits = Some((lower, upper));
+        self.limits_pending.set(true);
+        self
+    }
+
+    /// Sets the coordinate scale for this axis.
+    pub fn scale(&mut self, scale: AxisScale) -> &mut Self {
+        self.scale = scale;
+        self
+    }
 }
 
 impl AxisScale {
@@ -213,6 +275,108 @@ fn format_hover_label(
     format!("{prefix}x = {x}\ny = {y}")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AxisDomain {
+    lower: f64,
+    upper: f64,
+}
+
+impl AxisDomain {
+    const FALLBACK: Self = Self {
+        lower: 0.0,
+        upper: 1.0,
+    };
+
+    fn new(lower: f64, upper: f64, description: &str) -> Self {
+        assert!(
+            lower.is_finite() && upper.is_finite() && lower < upper,
+            "{description} must be finite and have lower < upper"
+        );
+        Self { lower, upper }
+    }
+
+    fn from_values(lower: f64, upper: f64) -> Self {
+        if !lower.is_finite() || !upper.is_finite() {
+            return Self::FALLBACK;
+        }
+
+        if lower < upper {
+            return Self { lower, upper };
+        }
+
+        let padding = if lower == 0.0 { 1.0 } else { lower.abs() * 0.5 };
+        Self {
+            lower: lower - padding,
+            upper: upper + padding,
+        }
+    }
+
+    fn span(self) -> f64 {
+        self.upper - self.lower
+    }
+
+    fn map_to(self, value: f64, target: Self) -> f64 {
+        target.lower + (value - self.lower) * target.span() / self.span()
+    }
+
+    fn range(self) -> (f64, f64) {
+        (self.lower, self.upper)
+    }
+
+    fn approximately_matches(self, range: std::ops::RangeInclusive<f64>) -> bool {
+        let tolerance = self.lower.abs().max(self.upper.abs()).max(1.0) * f64::EPSILON * 16.0;
+        (*range.start() - self.lower).abs() <= tolerance
+            && (*range.end() - self.upper).abs() <= tolerance
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct YAxisSignature {
+    side: YAxisSide,
+    scale: AxisScale,
+    limits: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct YAxesSignature(Vec<YAxisSignature>);
+
+#[derive(Clone)]
+struct TwinAxesMemory {
+    signature: YAxesSignature,
+    domains: Vec<AxisDomain>,
+}
+
+fn format_twin_hover_label(
+    name: &str,
+    point: &PlotPoint,
+    x_scale: AxisScale,
+    axes: &[(String, YAxisSide, AxisScale, AxisDomain)],
+    primary_domain: AxisDomain,
+) -> String {
+    let mut label = if name.is_empty() {
+        String::new()
+    } else {
+        format!("{name}\n")
+    };
+    label.push_str(&format!("x = {}", format_value(x_scale.inverse(point.x))));
+
+    for (axis_label, side, scale, domain) in axes {
+        let transformed = primary_domain.map_to(point.y, *domain);
+        let value = format_value(scale.inverse(transformed));
+        let axis_label = if axis_label.is_empty() {
+            match side {
+                YAxisSide::Left => "y (left)",
+                YAxisSide::Right => "y (right)",
+            }
+        } else {
+            axis_label
+        };
+        label.push_str(&format!("\n{axis_label} = {value}"));
+    }
+
+    label
+}
+
 struct RenderData {
     series_segments: Vec<Vec<Points>>,
     x_limits: Option<(f64, f64)>,
@@ -232,6 +396,7 @@ pub struct PlotLine {
     points: Points,
     label: Option<String>,
     style: SeriesStyle,
+    y_axis: YAxisId,
 }
 
 impl PlotLine {
@@ -243,6 +408,12 @@ impl PlotLine {
     /// Renders this series as unconnected point markers.
     pub fn points_only(&mut self) -> &mut Self {
         self.style = SeriesStyle::Points;
+        self
+    }
+
+    /// Assigns this series to a y-axis created by the same plotter.
+    pub fn y_axis(&mut self, axis: YAxisId) -> &mut Self {
+        self.y_axis = axis;
         self
     }
 
@@ -262,11 +433,22 @@ pub struct SeriesId(usize);
 pub struct ReferenceLine {
     value: f64,
     label: Option<String>,
+    y_axis: Option<YAxisId>,
 }
 
 impl ReferenceLine {
     pub fn label(&mut self, label: impl Into<String>) -> &mut Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Assigns a horizontal reference line to a y-axis.
+    ///
+    /// This has no effect on vertical reference lines, which use the shared x-axis.
+    pub fn y_axis(&mut self, axis: YAxisId) -> &mut Self {
+        if self.y_axis.is_some() {
+            self.y_axis = Some(axis);
+        }
         self
     }
 }
@@ -277,26 +459,57 @@ pub struct SummaryItem {
     value: String,
 }
 
-#[derive(Default)]
 pub struct Plotter {
     series: Vec<PlotLine>,
     horizontal_lines: Vec<ReferenceLine>,
     vertical_lines: Vec<ReferenceLine>,
     summary: Vec<SummaryItem>,
     x_label: String,
-    y_label: String,
+    y_axes: Vec<YAxis>,
     pub(crate) title: String,
     x_limits: Option<(f64, f64)>,
     x_limits_pending: std::cell::Cell<bool>,
-    y_limits: Option<(f64, f64)>,
-    y_limits_pending: std::cell::Cell<bool>,
     x_scale: AxisScale,
-    y_scale: AxisScale,
+}
+
+impl Default for Plotter {
+    fn default() -> Self {
+        Self {
+            series: Vec::new(),
+            horizontal_lines: Vec::new(),
+            vertical_lines: Vec::new(),
+            summary: Vec::new(),
+            x_label: String::new(),
+            y_axes: vec![YAxis::primary()],
+            title: String::new(),
+            x_limits: None,
+            x_limits_pending: std::cell::Cell::new(false),
+            x_scale: AxisScale::Linear,
+        }
+    }
 }
 
 impl Plotter {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn primary_y_axis(&self) -> &YAxis {
+        &self.y_axes[YAxisId::PRIMARY.0]
+    }
+
+    fn primary_y_axis_mut(&mut self) -> &mut YAxis {
+        &mut self.y_axes[YAxisId::PRIMARY.0]
+    }
+
+    fn y_axis(&self, id: YAxisId) -> &YAxis {
+        self.y_axes.get(id.0).unwrap_or_else(|| {
+            panic!(
+                "y-axis id {} is out of bounds for a plotter with {} y-axes",
+                id.0,
+                self.y_axes.len()
+            )
+        })
     }
 
     pub fn plot(&mut self, x: &[f64], y: &[f64]) -> &mut PlotLine {
@@ -314,6 +527,7 @@ impl Plotter {
             points,
             label: None,
             style: SeriesStyle::Line,
+            y_axis: YAxisId::PRIMARY,
         });
 
         self.series.last_mut().unwrap()
@@ -326,6 +540,7 @@ impl Plotter {
             points,
             label: None,
             style: SeriesStyle::Line,
+            y_axis: YAxisId::PRIMARY,
         });
 
         self.series.last_mut().unwrap()
@@ -382,8 +597,7 @@ impl Plotter {
 
     /// Sets the initial and reset y bounds, while allowing subsequent pan and zoom.
     pub fn ylim(&mut self, lower: f64, upper: f64) {
-        self.y_limits = Some((lower, upper));
-        self.y_limits_pending.set(true);
+        self.primary_y_axis_mut().limits(lower, upper);
     }
 
     /// Sets the scaling used by the x axis.
@@ -393,13 +607,32 @@ impl Plotter {
 
     /// Sets the scaling used by the y axis.
     pub fn yscale(&mut self, scale: AxisScale) {
-        self.y_scale = scale;
+        self.primary_y_axis_mut().scale(scale);
+    }
+
+    /// Adds another y-axis and returns its stable identifier.
+    pub fn add_y_axis(&mut self, side: YAxisSide) -> YAxisId {
+        let id = YAxisId(self.y_axes.len());
+        self.y_axes.push(YAxis::new(side));
+        id
+    }
+
+    /// Returns mutable configuration for a y-axis created by this plotter.
+    pub fn y_axis_mut(&mut self, id: YAxisId) -> &mut YAxis {
+        let axis_count = self.y_axes.len();
+        self.y_axes.get_mut(id.0).unwrap_or_else(|| {
+            panic!(
+                "y-axis id {} is out of bounds for a plotter with {axis_count} y-axes",
+                id.0
+            )
+        })
     }
 
     pub fn axhline(&mut self, y: f64) -> &mut ReferenceLine {
         self.horizontal_lines.push(ReferenceLine {
             value: y,
             label: None,
+            y_axis: Some(YAxisId::PRIMARY),
         });
 
         self.horizontal_lines.last_mut().unwrap()
@@ -409,6 +642,7 @@ impl Plotter {
         self.vertical_lines.push(ReferenceLine {
             value: x,
             label: None,
+            y_axis: None,
         });
 
         self.vertical_lines.last_mut().unwrap()
@@ -433,7 +667,7 @@ impl Plotter {
     }
 
     pub fn ylabel(&mut self, label: impl Into<String>) {
-        self.y_label = label.into();
+        self.primary_y_axis_mut().label(label);
     }
 
     pub fn title(&mut self, title: impl Into<String>) {
@@ -441,13 +675,17 @@ impl Plotter {
     }
 
     fn transform_for_rendering(&self) -> RenderData {
+        let y_axis = self.primary_y_axis();
         let series_segments = self
             .series
             .iter()
-            .map(|series| match series.style {
-                SeriesStyle::Line => transform_line(&series.points, self.x_scale, self.y_scale),
-                SeriesStyle::Points => {
-                    vec![transform_points(&series.points, self.x_scale, self.y_scale)]
+            .map(|series| {
+                self.y_axis(series.y_axis);
+                match series.style {
+                    SeriesStyle::Line => transform_line(&series.points, self.x_scale, y_axis.scale),
+                    SeriesStyle::Points => {
+                        vec![transform_points(&series.points, self.x_scale, y_axis.scale)]
+                    }
                 }
             })
             .collect();
@@ -457,18 +695,145 @@ impl Plotter {
                 self.x_scale.transform_required(upper, "x limits"),
             )
         });
-        let y_limits = self.y_limits.map(|(lower, upper)| {
+        let y_limits = y_axis.limits.map(|(lower, upper)| {
             (
-                self.y_scale.transform_required(lower, "y limits"),
-                self.y_scale.transform_required(upper, "y limits"),
+                y_axis.scale.transform_required(lower, "y limits"),
+                y_axis.scale.transform_required(upper, "y limits"),
             )
         });
         let horizontal_lines = self
             .horizontal_lines
             .iter()
             .map(|line| {
-                self.y_scale
+                y_axis
+                    .scale
                     .transform_required(line.value, "horizontal reference line")
+            })
+            .collect();
+        let vertical_lines = self
+            .vertical_lines
+            .iter()
+            .map(|line| {
+                self.x_scale
+                    .transform_required(line.value, "vertical reference line")
+            })
+            .collect();
+
+        RenderData {
+            series_segments,
+            x_limits,
+            y_limits,
+            horizontal_lines,
+            vertical_lines,
+        }
+    }
+
+    fn y_axes_signature(&self) -> YAxesSignature {
+        YAxesSignature(
+            self.y_axes
+                .iter()
+                .map(|axis| YAxisSignature {
+                    side: axis.side,
+                    scale: axis.scale,
+                    limits: axis.limits,
+                })
+                .collect(),
+        )
+    }
+
+    fn candidate_y_domains(&self, imported: &[ImportedSeries]) -> Vec<AxisDomain> {
+        let mut bounds = vec![(f64::INFINITY, f64::NEG_INFINITY); self.y_axes.len()];
+
+        let mut include = |axis_id: YAxisId, value: f64| {
+            let axis = self.y_axis(axis_id);
+            if let Some(value) = axis.scale.forward(value).filter(|value| value.is_finite()) {
+                bounds[axis_id.0].0 = bounds[axis_id.0].0.min(value);
+                bounds[axis_id.0].1 = bounds[axis_id.0].1.max(value);
+            }
+        };
+
+        for series in &self.series {
+            self.y_axis(series.y_axis);
+            for point in &series.points {
+                include(series.y_axis, point[1]);
+            }
+        }
+        for line in &self.horizontal_lines {
+            let axis = line.y_axis.expect("horizontal lines have a y-axis");
+            include(axis, line.value);
+        }
+        for series in imported {
+            for point in &series.points {
+                include(YAxisId::PRIMARY, point[1]);
+            }
+        }
+
+        self.y_axes
+            .iter()
+            .enumerate()
+            .map(|(index, axis)| {
+                if let Some((lower, upper)) = axis.limits {
+                    let lower = axis.scale.transform_required(lower, "y limits");
+                    let upper = axis.scale.transform_required(upper, "y limits");
+                    AxisDomain::new(lower, upper, "y limits")
+                } else {
+                    AxisDomain::from_values(bounds[index].0, bounds[index].1)
+                }
+            })
+            .collect()
+    }
+
+    fn transform_for_twin_axes(&self, domains: &[AxisDomain]) -> RenderData {
+        let primary_domain = domains[YAxisId::PRIMARY.0];
+        let map_points = |points: &mut Points, axis: YAxisId| {
+            let domain = domains[axis.0];
+            for point in points {
+                point[1] = domain.map_to(point[1], primary_domain);
+            }
+        };
+
+        let series_segments = self
+            .series
+            .iter()
+            .map(|series| {
+                let axis = self.y_axis(series.y_axis);
+                match series.style {
+                    SeriesStyle::Line => {
+                        let mut segments = transform_line(&series.points, self.x_scale, axis.scale);
+                        for segment in &mut segments {
+                            map_points(segment, series.y_axis);
+                        }
+                        segments
+                    }
+                    SeriesStyle::Points => {
+                        let mut points = transform_points(&series.points, self.x_scale, axis.scale);
+                        map_points(&mut points, series.y_axis);
+                        vec![points]
+                    }
+                }
+            })
+            .collect();
+        let x_limits = self.x_limits.map(|(lower, upper)| {
+            (
+                self.x_scale.transform_required(lower, "x limits"),
+                self.x_scale.transform_required(upper, "x limits"),
+            )
+        });
+        let y_limits = self
+            .y_axes
+            .iter()
+            .any(|axis| axis.limits.is_some())
+            .then(|| primary_domain.range());
+        let horizontal_lines = self
+            .horizontal_lines
+            .iter()
+            .map(|line| {
+                let axis_id = line.y_axis.expect("horizontal lines have a y-axis");
+                let axis = self.y_axis(axis_id);
+                let value = axis
+                    .scale
+                    .transform_required(line.value, "horizontal reference line");
+                domains[axis_id.0].map_to(value, primary_domain)
             })
             .collect();
         let vertical_lines = self
@@ -494,6 +859,7 @@ impl Plotter {
         plot_ui: &mut PlotUi<'_>,
         x_limits: Option<(f64, f64)>,
         y_limits: Option<(f64, f64)>,
+        y_limits_pending: bool,
         changed_scales: [bool; 2],
     ) {
         if changed_scales[0] || changed_scales[1] {
@@ -516,7 +882,7 @@ impl Plotter {
 
         if let Some((lower, upper)) = y_limits {
             // Apply new limits once; ordinary frames preserve mouse navigation.
-            if self.y_limits_pending.replace(false)
+            if y_limits_pending
                 || plot_ui.auto_bounds().y
                 || plot_ui.response().double_clicked()
                 || changed_scales[1]
@@ -599,7 +965,8 @@ impl Plotter {
 
         for (index, series) in imported.iter().enumerate() {
             let colour = MATPLOTLIB_COLORS[(colour_offset + index) % MATPLOTLIB_COLORS.len()];
-            let points = transform_points(&series.points, self.x_scale, self.y_scale);
+            let points =
+                transform_points(&series.points, self.x_scale, self.primary_y_axis().scale);
             let markers = PlotMarkers::new(
                 format!("imported_series_{}", series.id),
                 PlotPoints::from(points),
@@ -665,8 +1032,75 @@ impl Plotter {
         id: impl std::hash::Hash,
         imported: &[ImportedSeries],
     ) -> egui::Rect {
-        let render_data = self.transform_for_rendering();
         let plot_id = ui.make_persistent_id(egui::Id::new(&id));
+        let y_limits_pending = self.y_axes.iter().fold(false, |pending, axis| {
+            axis.limits_pending.replace(false) || pending
+        });
+        let current_scales = (
+            self.x_scale,
+            self.y_axes
+                .iter()
+                .map(|axis| axis.scale)
+                .collect::<Vec<_>>(),
+        );
+        let scale_memory_id = plot_id.with("myplotlib_axis_scales");
+        let previous_scales = ui.data_mut(|data| {
+            let previous = data.get_temp::<(AxisScale, Vec<AxisScale>)>(scale_memory_id);
+            data.insert_temp(scale_memory_id, current_scales.clone());
+            previous
+        });
+        let changed_scales = previous_scales
+            .map(|previous| {
+                [
+                    previous.0 != current_scales.0,
+                    previous.1 != current_scales.1,
+                ]
+            })
+            .unwrap_or([false, false]);
+
+        let (twin_domains, twin_domains_refreshed) = if self.y_axes.len() > 1 {
+            let signature = self.y_axes_signature();
+            let memory_id = plot_id.with("myplotlib_twin_y_axes");
+            let previous = ui.data_mut(|data| data.get_temp::<TwinAxesMemory>(memory_id));
+            let plot_memory = PlotMemory::load(ui.ctx(), plot_id);
+            let plot_was_auto = plot_memory
+                .as_ref()
+                .is_none_or(|memory| memory.auto_bounds.y);
+            let plot_was_at_base = plot_memory.as_ref().zip(previous.as_ref()).is_some_and(
+                |(plot_memory, axes_memory)| {
+                    axes_memory.domains[YAxisId::PRIMARY.0]
+                        .approximately_matches(plot_memory.bounds().range_y())
+                },
+            );
+            let has_automatic_axis = self.y_axes.iter().any(|axis| axis.limits.is_none());
+            let refresh = y_limits_pending
+                || changed_scales[1]
+                || previous
+                    .as_ref()
+                    .is_none_or(|memory| memory.signature != signature)
+                || has_automatic_axis && (plot_was_auto || plot_was_at_base);
+            let domains = if refresh {
+                self.candidate_y_domains(imported)
+            } else {
+                previous.expect("checked above").domains
+            };
+            ui.data_mut(|data| {
+                data.insert_temp(
+                    memory_id,
+                    TwinAxesMemory {
+                        signature,
+                        domains: domains.clone(),
+                    },
+                );
+            });
+            (Some(domains), refresh)
+        } else {
+            (None, false)
+        };
+        let render_data = twin_domains.as_deref().map_or_else(
+            || self.transform_for_rendering(),
+            |domains| self.transform_for_twin_axes(domains),
+        );
 
         if !self.title.is_empty() {
             ui.vertical_centered(|ui| {
@@ -680,20 +1114,11 @@ impl Plotter {
 
         let axes_rect = ui.available_rect_before_wrap();
         let plot_height = (axes_rect.bottom() - ui.next_widget_position().y).max(1.0);
-        let scale_memory_id = plot_id.with("myplotlib_axis_scales");
-        let previous_scales = ui.data_mut(|data| {
-            let previous = data.get_temp::<[AxisScale; 2]>(scale_memory_id);
-            data.insert_temp(scale_memory_id, [self.x_scale, self.y_scale]);
-            previous
-        });
-        let changed_scales = previous_scales
-            .map(|previous| [previous[0] != self.x_scale, previous[1] != self.y_scale])
-            .unwrap_or([false, false]);
+        let primary_y_axis = self.primary_y_axis();
 
         let mut plot = Plot::new(id)
             .legend(Legend::default())
             .x_axis_label(egui::RichText::new(&self.x_label).size(DEFAULT_LABEL_FONT_SIZE))
-            .y_axis_label(egui::RichText::new(&self.y_label).size(DEFAULT_LABEL_FONT_SIZE))
             .allow_drag(true)
             .allow_scroll(true)
             .allow_zoom(true)
@@ -702,19 +1127,65 @@ impl Plotter {
             .width(axes_rect.width())
             .height(plot_height);
 
+        if let Some(domains) = twin_domains.as_deref() {
+            let primary_domain = domains[YAxisId::PRIMARY.0];
+            let axis_hints = self
+                .y_axes
+                .iter()
+                .enumerate()
+                .map(|(index, axis)| {
+                    let mut hints = AxisHints::new_y()
+                        .label(egui::RichText::new(&axis.label).size(DEFAULT_LABEL_FONT_SIZE))
+                        .placement(match axis.side {
+                            YAxisSide::Left => HPlacement::Left,
+                            YAxisSide::Right => HPlacement::Right,
+                        });
+                    if index == YAxisId::PRIMARY.0 && axis.scale.is_logarithmic() {
+                        hints = hints.formatter(format_log10_tick);
+                    } else if index != YAxisId::PRIMARY.0 {
+                        let domain = domains[index];
+                        let scale = axis.scale;
+                        hints = hints.formatter(move |mark, _| {
+                            let transformed = primary_domain.map_to(mark.value, domain);
+                            format_value(scale.inverse(transformed))
+                        });
+                    }
+                    hints
+                })
+                .collect();
+            plot = plot.custom_y_axes(axis_hints);
+
+            let hover_axes = self
+                .y_axes
+                .iter()
+                .zip(domains)
+                .map(|(axis, &domain)| (axis.label.clone(), axis.side, axis.scale, domain))
+                .collect::<Vec<_>>();
+            let x_scale = self.x_scale;
+            plot = plot.label_formatter(move |name, point| {
+                format_twin_hover_label(name, point, x_scale, &hover_axes, primary_domain)
+            });
+        } else {
+            plot = plot.y_axis_label(
+                egui::RichText::new(&primary_y_axis.label).size(DEFAULT_LABEL_FONT_SIZE),
+            );
+        }
+
         if self.x_scale.is_logarithmic() {
             plot = plot
                 .x_grid_spacer(log10_grid_marks)
                 .x_axis_formatter(format_log10_tick);
         }
-        if self.y_scale.is_logarithmic() {
+        if primary_y_axis.scale.is_logarithmic() {
             plot = plot
                 .y_grid_spacer(log10_grid_marks)
                 .y_axis_formatter(format_log10_tick);
         }
-        if self.x_scale.is_logarithmic() || self.y_scale.is_logarithmic() {
+        if twin_domains.is_none()
+            && (self.x_scale.is_logarithmic() || primary_y_axis.scale.is_logarithmic())
+        {
             let x_scale = self.x_scale;
-            let y_scale = self.y_scale;
+            let y_scale = primary_y_axis.scale;
             plot = plot.label_formatter(move |name, point| {
                 format_hover_label(name, point, x_scale, y_scale)
             });
@@ -736,7 +1207,13 @@ impl Plotter {
                 vertical_lines,
             } = render_data;
 
-            self.apply_bounds(plot_ui, x_limits, y_limits, changed_scales);
+            self.apply_bounds(
+                plot_ui,
+                x_limits,
+                y_limits,
+                y_limits_pending || twin_domains_refreshed,
+                changed_scales,
+            );
             self.add_series(plot_ui, series_segments);
             self.add_horizontal_lines(plot_ui, horizontal_lines);
             self.add_vertical_lines(plot_ui, vertical_lines);
@@ -785,6 +1262,140 @@ mod tests {
 
         assert_eq!(plot.series[series.0].style, SeriesStyle::Points);
         assert_eq!(plot.series[series.0].points, vec![[3.0, 4.0]]);
+    }
+
+    #[test]
+    fn twin_axes_map_series_and_reference_lines_into_the_primary_domain() {
+        let mut plot = Plotter::new();
+        plot.ylim(0.0, 100.0);
+        plot.add_points(vec![[0.0, 0.0], [1.0, 50.0], [2.0, 100.0]]);
+
+        let right = plot.add_y_axis(YAxisSide::Right);
+        plot.y_axis_mut(right)
+            .label("Pressure (kPa)")
+            .limits(950.0, 1050.0);
+        plot.add_points(vec![[0.0, 950.0], [1.0, 1000.0], [2.0, 1050.0]])
+            .y_axis(right);
+        plot.axhline(1000.0).y_axis(right);
+
+        let domains = plot.candidate_y_domains(&[]);
+        let render_data = plot.transform_for_twin_axes(&domains);
+
+        assert_eq!(domains[0], AxisDomain::new(0.0, 100.0, "test"));
+        assert_eq!(domains[1], AxisDomain::new(950.0, 1050.0, "test"));
+        assert_eq!(
+            render_data.series_segments[1],
+            vec![vec![[0.0, 0.0], [1.0, 50.0], [2.0, 100.0]]]
+        );
+        assert_eq!(render_data.horizontal_lines, vec![50.0]);
+        assert_eq!(render_data.y_limits, Some((0.0, 100.0)));
+    }
+
+    #[test]
+    fn twin_axes_transform_each_scale_before_mapping() {
+        let mut plot = Plotter::new();
+        plot.ylim(-1.0, 1.0);
+        let right = plot.add_y_axis(YAxisSide::Right);
+        plot.y_axis_mut(right)
+            .limits(1.0, 100.0)
+            .scale(AxisScale::Log10);
+        plot.add_points(vec![[0.0, 1.0], [1.0, 10.0], [2.0, 100.0]])
+            .y_axis(right);
+
+        let domains = plot.candidate_y_domains(&[]);
+        let render_data = plot.transform_for_twin_axes(&domains);
+
+        assert_eq!(domains[1], AxisDomain::new(0.0, 2.0, "test"));
+        assert_eq!(
+            render_data.series_segments[0],
+            vec![vec![[0.0, -1.0], [1.0, 0.0], [2.0, 1.0]]]
+        );
+    }
+
+    #[test]
+    fn imported_series_contribute_to_the_primary_axis_domain() {
+        let mut plot = Plotter::new();
+        let right = plot.add_y_axis(YAxisSide::Right);
+        plot.y_axis_mut(right).limits(950.0, 1050.0);
+        let imported = ImportedSeries {
+            id: 1,
+            label: "CSV values".to_owned(),
+            source_name: "values.csv".to_owned(),
+            points: vec![[0.0, 10.0], [1.0, 20.0]],
+        };
+
+        let domains = plot.candidate_y_domains(&[imported]);
+
+        assert_eq!(domains[0], AxisDomain::new(10.0, 20.0, "test"));
+        assert_eq!(domains[1], AxisDomain::new(950.0, 1050.0, "test"));
+    }
+
+    #[test]
+    fn automatic_twin_domains_follow_data_until_the_user_navigates() {
+        fn input(time: f64, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            }
+        }
+
+        fn render(
+            ctx: &egui::Context,
+            plot: &Plotter,
+            input: egui::RawInput,
+        ) -> (egui::Id, PlotMemory) {
+            let mut id = egui::Id::NULL;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    id = ui.make_persistent_id(egui::Id::new("automatic-twin-test"));
+                    plot.show_ui(ui, "automatic-twin-test");
+                });
+            });
+            (id, PlotMemory::load(ctx, id).unwrap())
+        }
+
+        fn domains(ctx: &egui::Context, id: egui::Id) -> Vec<AxisDomain> {
+            ctx.data_mut(|data| {
+                data.get_temp::<TwinAxesMemory>(id.with("myplotlib_twin_y_axes"))
+                    .unwrap()
+                    .domains
+            })
+        }
+
+        let ctx = egui::Context::default();
+        let mut plot = Plotter::new();
+        plot.add_points(vec![[0.0, 0.0], [1.0, 100.0]]);
+        let right = plot.add_y_axis(YAxisSide::Right);
+        let right_series = plot
+            .add_points(vec![[0.0, 950.0], [1.0, 1050.0]])
+            .y_axis(right)
+            .id();
+
+        let (id, first) = render(&ctx, &plot, input(0.0, vec![]));
+        assert_eq!(domains(&ctx, id)[right.0].upper, 1050.0);
+
+        plot.append_points(right_series, [[2.0, 1100.0]]);
+        let (_, updated) = render(&ctx, &plot, input(0.1, vec![]));
+        assert_eq!(domains(&ctx, id)[right.0].upper, 1100.0);
+
+        let position = updated.transform().frame().center();
+        render(
+            &ctx,
+            &plot,
+            input(0.2, vec![egui::Event::PointerMoved(position)]),
+        );
+        let (_, zoomed) = render(&ctx, &plot, input(0.3, vec![egui::Event::Zoom(2.0)]));
+        assert!(!zoomed.auto_bounds.y);
+
+        plot.append_points(right_series, [[3.0, 1200.0]]);
+        render(&ctx, &plot, input(0.4, vec![]));
+        assert_eq!(domains(&ctx, id)[right.0].upper, 1100.0);
+        assert!(first.auto_bounds.y);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use myplotlib::{AxisScale, Figure, Plotter};
+use myplotlib::{AxisScale, Figure, Plotter, YAxisSide};
 
 #[test]
 fn supports_the_public_plotting_api() {
@@ -26,6 +26,31 @@ fn supports_the_public_plotting_api() {
         let show: fn(Plotter) -> myplotlib::Result = Plotter::show;
         let _ = (plot, show);
     }
+}
+
+#[test]
+fn supports_twin_y_axes_with_separate_configuration() {
+    let x = [0.0, 1.0, 2.0];
+    let temperature = [10.0, 20.0, 30.0];
+    let pressure = [98.0, 100.0, 102.0];
+
+    let mut plot = Plotter::new();
+    plot.ylabel("Temperature (°C)");
+    plot.ylim(0.0, 40.0);
+
+    let pressure_axis = plot.add_y_axis(YAxisSide::Right);
+    plot.y_axis_mut(pressure_axis)
+        .label("Pressure (kPa)")
+        .limits(95.0, 105.0)
+        .scale(AxisScale::Linear);
+
+    plot.plot(&x, &temperature).label("Temperature");
+    plot.plot(&x, &pressure)
+        .label("Pressure")
+        .y_axis(pressure_axis);
+    plot.axhline(100.0)
+        .label("Reference pressure")
+        .y_axis(pressure_axis);
 }
 
 #[test]

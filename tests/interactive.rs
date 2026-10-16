@@ -2,6 +2,7 @@ use eframe::egui;
 use egui_plot::PlotMemory;
 use myplotlib::{
     App, AppDefinition, AppResult, AxisScale, Plotter, Slider, SliderGrid, SliderGroup, ViewOption,
+    YAxisSide,
 };
 use std::cell::Cell;
 use std::sync::Arc;
@@ -59,6 +60,57 @@ fn sample_plot() -> Plotter {
     plot.xlim(0.0, 10.0);
     plot.ylim(-2.0, 2.0);
     plot
+}
+
+fn twin_axis_plot() -> Plotter {
+    let mut plot = Plotter::new();
+    plot.add_points(vec![[0.0, 0.0], [5.0, 50.0], [10.0, 100.0]])
+        .label("Temperature");
+    plot.ylabel("Temperature (°C)");
+    plot.ylim(0.0, 100.0);
+
+    let right = plot.add_y_axis(YAxisSide::Right);
+    plot.y_axis_mut(right)
+        .label("Pressure (kPa)")
+        .limits(950.0, 1050.0);
+    plot.add_points(vec![[0.0, 950.0], [5.0, 1000.0], [10.0, 1050.0]])
+        .label("Pressure")
+        .y_axis(right);
+    plot
+}
+
+#[test]
+fn twin_axes_render_separate_labels_and_navigate_as_one_view() {
+    let label_context = egui::Context::default();
+    let (output, _) = render_plot(&label_context, &twin_axis_plot(), input(0.0, vec![]));
+    assert!(contains_text(&output, "Temperature (°C)"));
+    assert!(contains_text(&output, "Pressure (kPa)"));
+
+    let ctx = egui::Context::default();
+    let plot = twin_axis_plot();
+    let first = plot_frame(&ctx, &plot, input(0.0, vec![]));
+    assert_eq!(first.bounds().range_y(), 0.0..=100.0);
+
+    let position = first.transform().frame().center();
+    plot_frame(
+        &ctx,
+        &plot,
+        input(0.1, vec![egui::Event::PointerMoved(position)]),
+    );
+    let zoomed = plot_frame(&ctx, &plot, input(0.2, vec![egui::Event::Zoom(2.0)]));
+    assert!(zoomed.bounds().height() < 100.0);
+    let idle = plot_frame(&ctx, &plot, input(0.3, vec![]));
+    assert_eq!(idle.bounds(), zoomed.bounds());
+
+    for (time, pressed) in [(1.0, true), (1.05, false), (1.1, true), (1.15, false)] {
+        plot_frame(
+            &ctx,
+            &plot,
+            input(time, vec![pointer_button(position, pressed)]),
+        );
+    }
+    let reset = plot_frame(&ctx, &plot, input(1.2, vec![]));
+    assert_eq!(reset.bounds().range_y(), 0.0..=100.0);
 }
 
 #[test]

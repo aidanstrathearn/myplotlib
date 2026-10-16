@@ -20,7 +20,9 @@ pub use app::{StreamAction, StreamPlanResult};
 pub use appmenu::AppMenu;
 pub use controls::{Slider, SliderGrid, SliderGroup};
 pub use figure::Figure;
-pub use plotter::{AxisScale, PlotLine, Plotter, ReferenceLine, SeriesId, SummaryItem};
+pub use plotter::{
+    AxisScale, PlotLine, Plotter, ReferenceLine, SeriesId, SummaryItem, YAxis, YAxisId, YAxisSide,
+};
 #[cfg(feature = "streaming")]
 pub use stream::{StreamContext, StreamError, StreamPlan, StreamResult};
 #[cfg(all(target_arch = "wasm32", feature = "streaming"))]
