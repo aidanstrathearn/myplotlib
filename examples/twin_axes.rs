@@ -20,7 +20,7 @@ fn main() -> myplotlib::Result {
     plot.plot(&time, &pressure)
         .label("Pressure")
         .y_axis(pressure_axis);
-    plot.ylim(17.0,25.0);
+    plot.ylim(17.0, 25.0);
 
     plot.show()
 }

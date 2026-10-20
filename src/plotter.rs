@@ -246,6 +246,23 @@ fn format_value(value: f64) -> String {
     }
 }
 
+fn format_tick_value(value: f64, step_size: f64) -> String {
+    if !value.is_finite() || !step_size.is_finite() || step_size <= 0.0 {
+        return format_value(value);
+    }
+
+    let absolute = value.abs();
+    if value != 0.0 && !(0.001..10_000.0).contains(&absolute) {
+        let exponent = absolute.log10().floor();
+        let scaled_step = step_size / 10.0_f64.powf(exponent);
+        let decimals = (-scaled_step.log10()).ceil().clamp(0.0, 3.0) as usize;
+        return format!("{value:.decimals$e}");
+    }
+
+    let decimals = (-step_size.log10()).ceil().clamp(0.0, 6.0) as usize;
+    format!("{value:.decimals$}")
+}
+
 fn format_log10_tick(mark: GridMark, _range: &std::ops::RangeInclusive<f64>) -> String {
     let mut exponent = mark.value.floor() as i32;
     let mut mantissa = 10.0_f64.powf(mark.value - f64::from(exponent)).round() as i32;
@@ -328,6 +345,42 @@ impl AxisDomain {
         (*range.start() - self.lower).abs() <= tolerance
             && (*range.end() - self.upper).abs() <= tolerance
     }
+}
+
+fn format_mapped_tick(
+    mark: GridMark,
+    primary_domain: AxisDomain,
+    axis_domain: AxisDomain,
+    scale: AxisScale,
+) -> String {
+    let transformed = primary_domain.map_to(mark.value, axis_domain);
+    let next_transformed = primary_domain.map_to(mark.value + mark.step_size, axis_domain);
+    let value = scale.inverse(transformed);
+    let next_value = scale.inverse(next_transformed);
+    format_tick_value(value, (next_value - value).abs())
+}
+
+fn paint_mirrored_right_y_label(
+    ui: &egui::Ui,
+    plot_rect: egui::Rect,
+    complete_rect: egui::Rect,
+    label: &str,
+) {
+    let color = ui.visuals().text_color();
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(DEFAULT_LABEL_FONT_SIZE),
+        color,
+    );
+    let center = egui::pos2(
+        complete_rect.right() - galley.size().y * 0.625,
+        plot_rect.center().y,
+    );
+    let pos = center - galley.size() * 0.5;
+    ui.painter().add(
+        egui::epaint::TextShape::new(pos, galley, color)
+            .with_angle_and_anchor(std::f32::consts::FRAC_PI_2, egui::Align2::CENTER_CENTER),
+    );
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1115,6 +1168,12 @@ impl Plotter {
         let axes_rect = ui.available_rect_before_wrap();
         let plot_height = (axes_rect.bottom() - ui.next_widget_position().y).max(1.0);
         let primary_y_axis = self.primary_y_axis();
+        let mirrored_right_axis = self
+            .y_axes
+            .iter()
+            .position(|axis| axis.side == YAxisSide::Right && !axis.label.is_empty());
+        let mirrored_right_label =
+            mirrored_right_axis.map(|index| self.y_axes[index].label.clone());
 
         let mut plot = Plot::new(id)
             .legend(Legend::default())
@@ -1135,7 +1194,14 @@ impl Plotter {
                 .enumerate()
                 .map(|(index, axis)| {
                     let mut hints = AxisHints::new_y()
-                        .label(egui::RichText::new(&axis.label).size(DEFAULT_LABEL_FONT_SIZE))
+                        .label(
+                            egui::RichText::new(if mirrored_right_axis == Some(index) {
+                                " "
+                            } else {
+                                &axis.label
+                            })
+                            .size(DEFAULT_LABEL_FONT_SIZE),
+                        )
                         .placement(match axis.side {
                             YAxisSide::Left => HPlacement::Left,
                             YAxisSide::Right => HPlacement::Right,
@@ -1146,8 +1212,7 @@ impl Plotter {
                         let domain = domains[index];
                         let scale = axis.scale;
                         hints = hints.formatter(move |mark, _| {
-                            let transformed = primary_domain.map_to(mark.value, domain);
-                            format_value(scale.inverse(transformed))
+                            format_mapped_tick(mark, primary_domain, domain, scale)
                         });
                     }
                     hints
@@ -1220,6 +1285,10 @@ impl Plotter {
             self.add_imported_series(plot_ui, imported);
         });
         ui.set_style(original_style);
+
+        if let Some(label) = mirrored_right_label {
+            paint_mirrored_right_y_label(ui, response.response.rect, axes_rect, &label);
+        }
 
         response.response.rect
     }
@@ -1310,6 +1379,25 @@ mod tests {
             render_data.series_segments[0],
             vec![vec![[0.0, -1.0], [1.0, 0.0], [2.0, 1.0]]]
         );
+    }
+
+    #[test]
+    fn mapped_ticks_round_to_their_effective_axis_step() {
+        let mark = GridMark {
+            value: 1.0,
+            step_size: 1.0,
+        };
+
+        assert_eq!(
+            format_mapped_tick(
+                mark,
+                AxisDomain::new(0.0, 3.0, "test"),
+                AxisDomain::new(0.0, 1.0, "test"),
+                AxisScale::Linear,
+            ),
+            "0.3"
+        );
+        assert_eq!(format_tick_value(100.242424, 0.5), "100.2");
     }
 
     #[test]

@@ -82,9 +82,24 @@ fn twin_axis_plot() -> Plotter {
 #[test]
 fn twin_axes_render_separate_labels_and_navigate_as_one_view() {
     let label_context = egui::Context::default();
-    let (output, _) = render_plot(&label_context, &twin_axis_plot(), input(0.0, vec![]));
+    let (output, plot_rect) = render_plot(&label_context, &twin_axis_plot(), input(0.0, vec![]));
     assert!(contains_text(&output, "Temperature (°C)"));
     assert!(contains_text(&output, "Pressure (kPa)"));
+    let text_shape = |label: &str| {
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == label => Some(text),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        text_shape("Temperature (°C)").map(|text| text.angle),
+        Some(-std::f32::consts::FRAC_PI_2)
+    );
+    let right_label = text_shape("Pressure (kPa)").unwrap();
+    assert_eq!(right_label.angle, std::f32::consts::FRAC_PI_2);
+    let right_label_rect = right_label.visual_bounding_rect();
+    assert!(right_label_rect.center().x > plot_rect.center().x);
+    assert!(right_label_rect.right() <= 800.0);
 
     let ctx = egui::Context::default();
     let plot = twin_axis_plot();
