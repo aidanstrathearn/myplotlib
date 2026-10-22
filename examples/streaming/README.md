@@ -20,10 +20,10 @@ Run it natively from the repository root:
 cargo run --manifest-path examples/streaming/Cargo.toml
 ```
 
-Selecting a streaming view prepares its initial plot without starting the
-calculation. Adjusting its controls rebuilds that initial plot, so the Gaussian
-and Lorentzian inputs and the fit's initial guess can be inspected before
-running the Voigt integration.
+By default, selecting a streaming view prepares its initial plot without
+starting the calculation. Adjusting its controls rebuilds that initial plot, so
+the Gaussian and Lorentzian inputs and the fit's initial guess can be inspected
+before running the Voigt integration.
 Start, Stop, progress, and status appear in a horizontal Streaming strip between
 the view's control grid and plot. Reset, saving, and compute time remain in the
 app header.
@@ -31,6 +31,18 @@ Ready views show the time used to prepare their initial plot; a completed stream
 replaces it with the background job's total time. Changing controls or views
 cancels active work; press Start when the new inputs are ready. The Expected
 error view remains synchronous and computes immediately.
+
+Each plan can customize its control-strip label and start automatically:
+
+```rust
+StreamPlan::new(plot, job)
+    .label("Monte Carlo sampling")
+    .autoplay(true)
+```
+
+Autoplay applies whenever the app prepares a fresh plan, including after its
+controls change or the user returns to its view. The default label is
+`Streaming`, and autoplay is disabled by default.
 
 Build a threaded WebAssembly site and serve it with cross-origin isolation:
 

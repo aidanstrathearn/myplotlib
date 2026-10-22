@@ -1,6 +1,6 @@
 use crate::data_import::{ImportedSeries, import_dropped_file};
 #[cfg(feature = "streaming")]
-use crate::stream::{StreamState, StreamStatus};
+use crate::stream::{DEFAULT_STREAM_LABEL, StreamState, StreamStatus};
 #[cfg(target_arch = "wasm32")]
 use crate::web::{self, WebHandle, WebResult};
 use crate::{Plotter, SliderGrid, save};
@@ -545,16 +545,20 @@ where
             return None;
         }
 
-        let (status, progress, error) = match self.plot_state.as_ref() {
+        let (label, status, progress, error) = match self.plot_state.as_ref() {
             Some(PlotState::Streaming(state)) => (
+                state.label(),
                 state.status(),
                 state.progress(),
                 state.error().map(str::to_owned),
             ),
-            Some(PlotState::Immediate(Err(error), _)) => {
-                (StreamStatus::Failed, None, Some(error.to_string()))
-            }
-            _ => (StreamStatus::Ready, None, None),
+            Some(PlotState::Immediate(Err(error), _)) => (
+                DEFAULT_STREAM_LABEL,
+                StreamStatus::Failed,
+                None,
+                Some(error.to_string()),
+            ),
+            _ => (DEFAULT_STREAM_LABEL, StreamStatus::Ready, None, None),
         };
 
         ui.scope(|ui| {
@@ -565,7 +569,7 @@ where
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.heading("Streaming");
+                        ui.heading(label);
 
                         ui.separator();
 
@@ -691,7 +695,9 @@ where
         if !is_ready {
             self.prepare_plot();
         }
-        if let Some(PlotState::Streaming(state)) = &mut self.plot_state {
+        if let Some(PlotState::Streaming(state)) = &mut self.plot_state
+            && state.status() == StreamStatus::Ready
+        {
             state.start();
         }
     }
@@ -754,17 +760,17 @@ where
 
         let controls_changed = self.draw_control_grid(ui);
 
-        #[cfg(feature = "streaming")]
-        let stream_command = self.draw_stream_control_row(ui);
-        #[cfg(not(feature = "streaming"))]
-        let stream_command = None;
-
         let needs_preparation =
             view_changed || reset_requested || controls_changed || self.plot_state.is_none();
         if needs_preparation {
             self.prepare_plot();
             ui.ctx().request_repaint();
         }
+
+        #[cfg(feature = "streaming")]
+        let stream_command = self.draw_stream_control_row(ui);
+        #[cfg(not(feature = "streaming"))]
+        let stream_command = None;
 
         if matches!(stream_command, Some(StreamCommand::Start)) {
             #[cfg(feature = "streaming")]

@@ -10,6 +10,8 @@ use std::time::Duration;
 use web_time::Instant;
 
 static RUNS: AtomicUsize = AtomicUsize::new(0);
+static AUTOPLAY_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
+static AUTOPLAY_RUNS: AtomicUsize = AtomicUsize::new(0);
 static CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static POLL_CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static UPDATE_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -37,6 +39,18 @@ fn stream(_: &mut Params) -> PlanResult {
         stream.append(series, [[2.0, 3.0]])?;
         Ok(())
     }))
+}
+
+fn autoplay_stream(_: &mut Params) -> PlanResult {
+    AUTOPLAY_PREPARATIONS.fetch_add(1, Ordering::Relaxed);
+    let mut plot = Plotter::new();
+    plot.add_points(Vec::new());
+    Ok(StreamPlan::new(plot, |_| {
+        AUTOPLAY_RUNS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    })
+    .label("Automatic calculation")
+    .autoplay(true))
 }
 
 fn input(time: f64) -> egui::RawInput {
@@ -160,6 +174,58 @@ fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
         app.update(context, &mut frame);
     });
     assert_eq!(repaint_delay(&settled), Duration::MAX);
+}
+
+#[test]
+fn configured_stream_uses_its_label_and_autoplays_after_view_reentry() {
+    use eframe::App as _;
+
+    AUTOPLAY_PREPARATIONS.store(0, Ordering::Relaxed);
+    AUTOPLAY_RUNS.store(0, Ordering::Relaxed);
+    const VIEWS: &[ViewOption<Params>] = &[
+        ViewOption::streaming("Stream", autoplay_stream, controls),
+        ViewOption::new("Immediate", immediate, controls),
+    ];
+    let context = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(context.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    let first = context.run(input(0.0), |context| app.update(context, &mut frame));
+    assert!(contains_text_starting_with(&first, "Automatic calculation"));
+    assert!(contains_text_starting_with(&first, "Running"));
+    assert!(contains_text_starting_with(&first, "Stop"));
+    assert_eq!(AUTOPLAY_PREPARATIONS.load(Ordering::Relaxed), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while AUTOPLAY_RUNS.load(Ordering::Relaxed) < 1 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 1);
+
+    let immediate_output = context.run(key_input(0.1, egui::Key::Num2), |context| {
+        app.update(context, &mut frame)
+    });
+    assert!(contains_text_starting_with(
+        &immediate_output,
+        "Immediate signal"
+    ));
+
+    let restarted = context.run(key_input(0.2, egui::Key::Num1), |context| {
+        app.update(context, &mut frame)
+    });
+    assert!(contains_text_starting_with(
+        &restarted,
+        "Automatic calculation"
+    ));
+    assert!(contains_text_starting_with(&restarted, "Running"));
+    assert_eq!(AUTOPLAY_PREPARATIONS.load(Ordering::Relaxed), 2);
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while AUTOPLAY_RUNS.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 2);
 }
 
 fn waiting_stream(_: &mut Params) -> PlanResult {

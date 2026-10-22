@@ -10,6 +10,7 @@ use std::time::Duration;
 use web_time::Instant;
 
 const UPDATE_QUEUE_CAPACITY: usize = 64;
+pub(crate) const DEFAULT_STREAM_LABEL: &str = "Streaming";
 
 type ParamUpdate<P> = Box<dyn FnOnce(&mut P) + Send + 'static>;
 type PointBinding<P> = (SeriesId, Box<dyn Fn(&P) -> Points + 'static>);
@@ -26,6 +27,8 @@ pub struct StreamPlan<P> {
     plotter: Plotter,
     job: StreamJob<P>,
     point_bindings: Vec<PointBinding<P>>,
+    label: String,
+    autoplay: bool,
 }
 
 impl<P: 'static> StreamPlan<P> {
@@ -39,7 +42,25 @@ impl<P: 'static> StreamPlan<P> {
             plotter,
             job: Box::new(job),
             point_bindings: Vec::new(),
+            label: DEFAULT_STREAM_LABEL.to_owned(),
+            autoplay: false,
         }
+    }
+
+    /// Sets the heading shown in the stream control strip.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Sets whether computation starts whenever the app prepares this plan.
+    ///
+    /// Autoplay is disabled by default. When enabled, selecting the view,
+    /// changing its controls, or resetting the app starts the newly prepared
+    /// stream without waiting for the Start button.
+    pub fn autoplay(mut self, autoplay: bool) -> Self {
+        self.autoplay = autoplay;
+        self
     }
 
     /// Recomputes a series on the UI thread after streamed parameter updates.
@@ -57,9 +78,23 @@ impl<P: 'static> StreamPlan<P> {
         self
     }
 
-    pub(crate) fn into_parts(self) -> (Plotter, StreamJob<P>, Vec<PointBinding<P>>) {
-        (self.plotter, self.job, self.point_bindings)
+    fn into_parts(self) -> StreamPlanParts<P> {
+        StreamPlanParts {
+            plotter: self.plotter,
+            job: self.job,
+            point_bindings: self.point_bindings,
+            label: self.label,
+            autoplay: self.autoplay,
+        }
     }
+}
+
+struct StreamPlanParts<P> {
+    plotter: Plotter,
+    job: StreamJob<P>,
+    point_bindings: Vec<PointBinding<P>>,
+    label: String,
+    autoplay: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +259,7 @@ pub(crate) struct StreamState<P> {
     pub(crate) plotter: Plotter,
     job: Option<StreamJob<P>>,
     point_bindings: Vec<PointBinding<P>>,
+    label: String,
     updates: Option<Receiver<StreamUpdate<P>>>,
     cancel: Option<CancelFlag>,
     status: StreamStatus,
@@ -235,11 +271,18 @@ pub(crate) struct StreamState<P> {
 
 impl<P: 'static> StreamState<P> {
     pub(crate) fn prepare(plan: StreamPlan<P>) -> Self {
-        let (plotter, job, point_bindings) = plan.into_parts();
-        Self {
+        let StreamPlanParts {
+            plotter,
+            job,
+            point_bindings,
+            label,
+            autoplay,
+        } = plan.into_parts();
+        let mut state = Self {
             plotter,
             job: Some(job),
             point_bindings,
+            label,
             updates: None,
             cancel: None,
             status: StreamStatus::Ready,
@@ -247,7 +290,11 @@ impl<P: 'static> StreamState<P> {
             started: None,
             elapsed: Duration::ZERO,
             error: None,
+        };
+        if autoplay {
+            state.start();
         }
+        state
     }
 
     pub(crate) fn start(&mut self) {
@@ -375,6 +422,10 @@ impl<P: 'static> StreamState<P> {
         self.status
     }
 
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
     pub(crate) fn progress(&self) -> Option<f32> {
         self.progress
     }
@@ -441,11 +492,32 @@ mod tests {
         });
         let mut state = StreamState::prepare(plan);
 
+        assert_eq!(state.label(), DEFAULT_STREAM_LABEL);
         assert_eq!(state.status(), StreamStatus::Ready);
         assert!(!state.needs_repaint_poll());
         assert_eq!(started_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
 
         state.start();
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn configured_stream_uses_its_label_and_starts_automatically() {
+        let (plot, _) = plot_with_series();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let plan = StreamPlan::<()>::new(plot, move |_| {
+            started_sender.send(()).unwrap();
+            Ok(())
+        })
+        .label("Automatic calculation")
+        .autoplay(true);
+        let state = StreamState::prepare(plan);
+
+        assert_eq!(state.label(), "Automatic calculation");
+        assert_eq!(state.status(), StreamStatus::Running);
+        assert!(state.needs_repaint_poll());
         started_receiver
             .recv_timeout(Duration::from_secs(1))
             .unwrap();
