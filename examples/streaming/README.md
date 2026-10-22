@@ -24,8 +24,9 @@ Selecting a streaming view prepares its initial plot without starting the
 calculation. Adjusting its controls rebuilds that initial plot, so the Gaussian
 and Lorentzian inputs and the fit's initial guess can be inspected before
 running the Voigt integration.
-Start, Stop, progress, and status appear in a trailing Streaming group in the
-view's control grid. Reset, saving, and compute time remain in the app header.
+Start, Stop, progress, and status appear in a horizontal Streaming strip between
+the view's control grid and plot. Reset, saving, and compute time remain in the
+app header.
 Ready views show the time used to prepare their initial plot; a completed stream
 replaces it with the background job's total time. Changing controls or views
 cancels active work; press Start when the new inputs are ready. The Expected

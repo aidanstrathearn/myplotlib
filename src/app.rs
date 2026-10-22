@@ -522,24 +522,7 @@ where
         self.pending_drop_target = None;
     }
 
-    fn draw_control_row(&mut self, ui: &mut Ui) -> (bool, Option<StreamCommand>) {
-        #[cfg(feature = "streaming")]
-        let stream_info = if matches!(self.selected_option().action, ViewAction::Streaming(_)) {
-            Some(match self.plot_state.as_ref() {
-                Some(PlotState::Streaming(state)) => (
-                    state.status(),
-                    state.progress(),
-                    state.error().map(str::to_owned),
-                ),
-                Some(PlotState::Immediate(Err(error), _)) => {
-                    (StreamStatus::Failed, None, Some(error.to_string()))
-                }
-                _ => (StreamStatus::Ready, None, None),
-            })
-        } else {
-            None
-        };
-
+    fn draw_control_grid(&mut self, ui: &mut Ui) -> bool {
         ui.scope(|ui| {
             ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
@@ -549,15 +532,7 @@ where
                 .show(ui, |ui| {
                     let controls = self.selected_option().controls;
                     let grid = controls(&mut self.params);
-
-                    #[cfg(feature = "streaming")]
-                    if let Some((status, progress, error)) = stream_info {
-                        return grid.show_with_trailing_group(ui, "Streaming", |ui| {
-                            Self::draw_stream_controls(ui, status, progress, error.as_deref())
-                        });
-                    }
-
-                    (grid.show(ui), None)
+                    grid.show(ui)
                 })
                 .inner
         })
@@ -565,50 +540,74 @@ where
     }
 
     #[cfg(feature = "streaming")]
-    fn draw_stream_controls(
-        ui: &mut Ui,
-        status: StreamStatus,
-        progress: Option<f32>,
-        error: Option<&str>,
-    ) -> Option<StreamCommand> {
-        let command = ui
-            .horizontal(|ui| {
-                let command = match status {
-                    StreamStatus::Running => {
-                        ui.button("Stop").clicked().then_some(StreamCommand::Stop)
-                    }
-                    StreamStatus::Stopping => {
-                        ui.add_enabled(false, egui::Button::new("Stop"));
-                        None
-                    }
-                    StreamStatus::Ready
-                    | StreamStatus::Stopped
-                    | StreamStatus::Finished
-                    | StreamStatus::Failed => {
-                        ui.button("Start").clicked().then_some(StreamCommand::Start)
-                    }
-                };
+    fn draw_stream_control_row(&self, ui: &mut Ui) -> Option<StreamCommand> {
+        if !matches!(self.selected_option().action, ViewAction::Streaming(_)) {
+            return None;
+        }
 
-                if let Some(error) = error {
-                    ui.colored_label(ui.visuals().error_fg_color, status.label())
-                        .on_hover_text(error);
-                } else {
-                    ui.label(status.label());
-                }
+        let (status, progress, error) = match self.plot_state.as_ref() {
+            Some(PlotState::Streaming(state)) => (
+                state.status(),
+                state.progress(),
+                state.error().map(str::to_owned),
+            ),
+            Some(PlotState::Immediate(Err(error), _)) => {
+                (StreamStatus::Failed, None, Some(error.to_string()))
+            }
+            _ => (StreamStatus::Ready, None, None),
+        };
 
-                command
-            })
-            .inner;
+        ui.scope(|ui| {
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
-        ui.add_visible(
-            progress.is_some(),
-            egui::ProgressBar::new(progress.unwrap_or_default())
-                .show_percentage()
-                .desired_width(120.0)
-                .animate(status == StreamStatus::Running),
-        );
+            egui::ScrollArea::horizontal()
+                .id_salt(("plot-app-stream-controls", self.selected_view))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Streaming");
 
-        command
+                        ui.separator();
+
+                        let command = match status {
+                            StreamStatus::Running => {
+                                ui.button("Stop").clicked().then_some(StreamCommand::Stop)
+                            }
+                            StreamStatus::Stopping => {
+                                ui.add_enabled(false, egui::Button::new("Stop"));
+                                None
+                            }
+                            StreamStatus::Ready
+                            | StreamStatus::Stopped
+                            | StreamStatus::Finished
+                            | StreamStatus::Failed => {
+                                ui.button("Start").clicked().then_some(StreamCommand::Start)
+                            }
+                        };
+
+                        if let Some(error) = error {
+                            ui.colored_label(ui.visuals().error_fg_color, status.label())
+                                .on_hover_text(error);
+                        } else {
+                            ui.label(status.label());
+                        }
+
+                        if let Some(progress) = progress {
+                            ui.add(
+                                egui::ProgressBar::new(progress)
+                                    .show_percentage()
+                                    .desired_width(120.0)
+                                    .animate(status == StreamStatus::Running),
+                            );
+                        }
+
+                        command
+                    })
+                    .inner
+                })
+                .inner
+        })
+        .inner
     }
 
     fn prepare_plot(&mut self) {
@@ -753,7 +752,12 @@ where
         // plot titles and legends, the plot itself, and its summary panel.
         let capture_rect = ui.available_rect_before_wrap();
 
-        let (controls_changed, stream_command) = self.draw_control_row(ui);
+        let controls_changed = self.draw_control_grid(ui);
+
+        #[cfg(feature = "streaming")]
+        let stream_command = self.draw_stream_control_row(ui);
+        #[cfg(not(feature = "streaming"))]
+        let stream_command = None;
 
         let needs_preparation =
             view_changed || reset_requested || controls_changed || self.plot_state.is_none();

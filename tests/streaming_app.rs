@@ -344,10 +344,14 @@ fn stream_parameter_updates_refresh_controls_and_bound_points_without_preparing_
     let ready = context.run(input(frame_time), |context| app.update(context, &mut frame));
     assert!(contains_text_starting_with(&ready, "Worker value"));
     assert!(contains_text_starting_with(&ready, "0"));
-    assert!(text_position(&ready, "Streaming").x > text_position(&ready, "Worker state").x);
+    let stream_heading = text_position(&ready, "Streaming");
+    let worker_heading = text_position(&ready, "Worker state");
+    let start = text_position(&ready, "Start");
+    assert!(stream_heading.y > worker_heading.y);
+    assert!(start.x > stream_heading.x);
+    assert!((start.y - stream_heading.y).abs() < 8.0);
     assert_eq!(UPDATE_PREPARATIONS.load(Ordering::Relaxed), 1);
 
-    let start = text_position(&ready, "Start");
     frame_time += 0.01;
     let _ = context.run(pointer_input(frame_time, start, true), |context| {
         app.update(context, &mut frame)
