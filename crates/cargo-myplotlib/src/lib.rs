@@ -660,9 +660,30 @@ fn site_html(asset_version: &str, rayon_threads: Option<u32>) -> String {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Myplotlib application</title>
 {{SERVICE_WORKER}}    <style>
-      html, body, canvas { width: 100%; height: 100%; margin: 0; }
+      html, body, canvas {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        background: #f8f8f8;
+      }
       body { overflow: hidden; }
       canvas { display: block; }
+      #loading {
+        position: fixed;
+        inset: 50% auto auto 50%;
+        box-sizing: border-box;
+        width: 1.5rem;
+        height: 1.5rem;
+        margin: -0.75rem 0 0 -0.75rem;
+        border: 3px solid #d0d0d0;
+        border-top-color: #505050;
+        border-radius: 50%;
+        animation: spin 700ms linear infinite;
+        pointer-events: none;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
       #error {
         position: fixed;
         inset: 1rem auto auto 1rem;
@@ -678,17 +699,21 @@ fn site_html(asset_version: &str, rayon_threads: Option<u32>) -> String {
   </head>
   <body>
     <canvas id="app"></canvas>
+    <div id="loading" role="status" aria-label="Loading application"></div>
     <pre id="error" role="alert"></pre>
     <script type="module">
-      import { mount } from "{{APP_MODULE}}";
-
 {{WORKER_CLEANUP}}      const canvas = document.querySelector("#app");
+      const loading = document.querySelector("#loading");
       try {
+        const { mount } = await import("{{APP_MODULE}}");
         {{MOUNT}}
+        await new Promise((resolve) => requestAnimationFrame(resolve));
       } catch (error) {
         document.querySelector("#error").textContent =
           error instanceof Error ? error.message : String(error);
         console.error(error);
+      } finally {
+        loading.remove();
       }
     </script>
   </body>
@@ -1075,6 +1100,13 @@ mod tests {
         let html = fs::read_to_string(directory.join("index.html")).unwrap();
         assert!(html.contains(SITE_FILE_MARKER));
         assert!(html.contains("./app.js?v=threaded-version"));
+        assert!(html.contains("background: #f8f8f8;"));
+        assert!(html.contains(
+            "<div id=\"loading\" role=\"status\" aria-label=\"Loading application\"></div>"
+        ));
+        assert!(html.contains("const { mount } = await import(\"./app.js?v=threaded-version\");"));
+        assert!(html.contains("loading.remove();"));
+        assert!(!html.contains("import { mount } from"));
         assert!(html.contains("<script src=\"./coi-serviceworker.js\"></script>"));
         assert!(html.contains("await mount(canvas, { threads: 12 });"));
         assert!(!html.contains("hardwareConcurrency"));
@@ -1092,6 +1124,7 @@ mod tests {
         write_site_assets(&directory, "ordinary-version", None).unwrap();
         let html = fs::read_to_string(directory.join("index.html")).unwrap();
         assert!(html.contains("./app.js?v=ordinary-version"));
+        assert!(html.contains("const { mount } = await import(\"./app.js?v=ordinary-version\");"));
         assert!(html.contains("await mount(canvas);"));
         assert!(!html.contains("threads:"));
         assert!(!html.contains("<script src=\"./coi-serviceworker.js\"></script>"));
