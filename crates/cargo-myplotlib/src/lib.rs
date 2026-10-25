@@ -16,6 +16,7 @@ const COI_SERVICE_WORKER_JS: &str = include_str!("../../../web/coi-serviceworker
 const APACHE_2_0_LICENSE: &str = include_str!("../../../LICENSES/Apache-2.0.txt");
 const SITE_FILE_MARKER: &str = "cargo-myplotlib-generated-site";
 const SITE_FILES: [&str; 3] = ["index.html", "_headers", "coi-serviceworker.js"];
+const DEFAULT_SITE_TITLE: &str = "Myplotlib application";
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const WASM_BINDGEN_RAYON_1_3_0_WORKER_FINGERPRINT: u64 = 0x85de_7534_7bfe_359f;
@@ -41,6 +42,7 @@ Build options:
   --release                 Build optimized Wasm
   --locked                  Require Cargo.lock to remain unchanged
   --site                    Generate a directly serveable site
+  --title <TITLE>           Browser title for a generated site
   --wasm-threads            Build with shared-memory WebAssembly threads
   --rayon-threads <COUNT>   Rayon workers for a threaded generated site
   --wasm-max-memory <BYTES> Shared-memory maximum (default: 1073741824)
@@ -63,6 +65,7 @@ pub struct BuildWeb {
     pub release: bool,
     pub locked: bool,
     pub site: bool,
+    pub title: String,
     pub wasm_threads: bool,
     pub rayon_threads: Option<u32>,
     pub wasm_max_memory: u64,
@@ -76,6 +79,7 @@ impl Default for BuildWeb {
             release: false,
             locked: false,
             site: false,
+            title: DEFAULT_SITE_TITLE.to_owned(),
             wasm_threads: false,
             rayon_threads: None,
             wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
@@ -183,6 +187,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
     }
 
     let mut config = BuildWeb::default();
+    let mut title_set = false;
     let mut wasm_max_memory_set = false;
     let mut index = 1;
     while index < args.len() {
@@ -201,6 +206,11 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
             "--release" => config.release = true,
             "--locked" => config.locked = true,
             "--site" => config.site = true,
+            "--title" => {
+                index += 1;
+                config.title = text_option_value(&args, index, "--title")?.to_owned();
+                title_set = true;
+            }
             "--wasm-threads" => config.wasm_threads = true,
             "--rayon-threads" => {
                 index += 1;
@@ -231,6 +241,9 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Action, Er
         index += 1;
     }
 
+    if title_set && !config.site {
+        return Err(Error::new("--title requires --site"));
+    }
     if wasm_max_memory_set && !config.wasm_threads {
         return Err(Error::new("--wasm-max-memory requires --wasm-threads"));
     }
@@ -331,7 +344,12 @@ pub fn build_web(config: BuildWeb) -> Result<(), Error> {
     let asset_version = version_wasm_assets(&out_dir, rayon_worker.as_deref())?;
     write_web_assets(&out_dir, &asset_version)?;
     if config.site {
-        write_site_assets(&out_dir, &asset_version, config.rayon_threads)?;
+        write_site_assets(
+            &out_dir,
+            &asset_version,
+            config.rayon_threads,
+            &config.title,
+        )?;
     }
 
     let output_kind = if config.site { "site" } else { "package" };
@@ -603,13 +621,14 @@ fn write_site_assets(
     out_dir: &Path,
     asset_version: &str,
     rayon_threads: Option<u32>,
+    title: &str,
 ) -> Result<(), Error> {
     // Recheck after wasm-pack finishes so a file created during the build is
     // never mistaken for one cargo-myplotlib owns.
     preflight_site_assets(out_dir)?;
     write_asset(
         &out_dir.join("index.html"),
-        &site_html(asset_version, rayon_threads),
+        &site_html(asset_version, rayon_threads, title),
     )?;
 
     if rayon_threads.is_some() {
@@ -652,13 +671,26 @@ fn site_headers() -> String {
     )
 }
 
-fn site_html(asset_version: &str, rayon_threads: Option<u32>) -> String {
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn site_html(asset_version: &str, rayon_threads: Option<u32>, title: &str) -> String {
     const TEMPLATE: &str = r##"<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Myplotlib application</title>
+    <title>{{TITLE}}</title>
 {{SERVICE_WORKER}}    <style>
       html, body, canvas {
         width: 100%;
@@ -741,7 +773,8 @@ fn site_html(asset_version: &str, rayon_threads: Option<u32>) -> String {
 
 "#;
 
-    let mut html = TEMPLATE.replace(
+    let mut html = TEMPLATE.replace("{{TITLE}}", &escape_html_text(title));
+    html = html.replace(
         "{{SERVICE_WORKER}}",
         if rayon_threads.is_some() {
             "    <script src=\"./coi-serviceworker.js\"></script>\n"
@@ -843,6 +876,7 @@ mod tests {
             release: true,
             locked: true,
             site: false,
+            title: DEFAULT_SITE_TITLE.to_owned(),
             wasm_threads: false,
             rayon_threads: None,
             wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
@@ -954,6 +988,8 @@ mod tests {
         let action = parse_args(arguments(&[
             "build-web",
             "--site",
+            "--title",
+            "Live charts & reports",
             "--wasm-threads",
             "--rayon-threads",
             "12",
@@ -963,6 +999,7 @@ mod tests {
             panic!("expected a build action");
         };
         assert!(config.site);
+        assert_eq!(config.title, "Live charts & reports");
         assert!(config.wasm_threads);
         assert_eq!(config.rayon_threads, Some(12));
 
@@ -971,6 +1008,7 @@ mod tests {
             panic!("expected a build action");
         };
         assert!(config.site);
+        assert_eq!(config.title, DEFAULT_SITE_TITLE);
         assert!(!config.wasm_threads);
         assert_eq!(config.rayon_threads, None);
     }
@@ -991,6 +1029,12 @@ mod tests {
 
         let error = parse_args(arguments(&["build-web", "--site", "--wasm-threads"])).unwrap_err();
         assert!(error.to_string().contains("requires --rayon-threads"));
+
+        let error = parse_args(arguments(&["build-web", "--title", "Dashboard"])).unwrap_err();
+        assert!(error.to_string().contains("--title requires --site"));
+
+        let error = parse_args(arguments(&["build-web", "--site", "--title"])).unwrap_err();
+        assert!(error.to_string().contains("--title requires a value"));
 
         for value in ["0", "many"] {
             let error = parse_args(arguments(&[
@@ -1013,6 +1057,7 @@ mod tests {
             release: true,
             locked: true,
             site: false,
+            title: DEFAULT_SITE_TITLE.to_owned(),
             wasm_threads: false,
             rayon_threads: None,
             wasm_max_memory: threaded::DEFAULT_MAX_MEMORY,
@@ -1095,10 +1140,17 @@ mod tests {
     #[test]
     fn writes_threaded_and_non_threaded_sites() {
         let directory = temporary_directory();
-        write_site_assets(&directory, "threaded-version", Some(12)).unwrap();
+        write_site_assets(
+            &directory,
+            "threaded-version",
+            Some(12),
+            "Charts <live> & reports",
+        )
+        .unwrap();
 
         let html = fs::read_to_string(directory.join("index.html")).unwrap();
         assert!(html.contains(SITE_FILE_MARKER));
+        assert!(html.contains("<title>Charts &lt;live&gt; &amp; reports</title>"));
         assert!(html.contains("./app.js?v=threaded-version"));
         assert!(html.contains("background: #f8f8f8;"));
         assert!(html.contains(
@@ -1121,8 +1173,9 @@ mod tests {
         assert!(worker.contains(SITE_FILE_MARKER));
         assert!(worker.contains("navigator.serviceWorker"));
 
-        write_site_assets(&directory, "ordinary-version", None).unwrap();
+        write_site_assets(&directory, "ordinary-version", None, DEFAULT_SITE_TITLE).unwrap();
         let html = fs::read_to_string(directory.join("index.html")).unwrap();
+        assert!(html.contains("<title>Myplotlib application</title>"));
         assert!(html.contains("./app.js?v=ordinary-version"));
         assert!(html.contains("const { mount } = await import(\"./app.js?v=ordinary-version\");"));
         assert!(html.contains("await mount(canvas);"));

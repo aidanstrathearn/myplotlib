@@ -29,6 +29,7 @@ directory:
 ```sh
 cargo myplotlib build-web \
   --site \
+  --title "My dashboard" \
   --manifest-path path/to/Cargo.toml \
   --out-dir dist
 cargo myplotlib serve --dir dist
@@ -38,7 +39,8 @@ The generated `index.html` uses relative asset URLs, so the directory can be
 served at a domain root or below another path. Site mode owns `index.html`,
 `_headers`, and `coi-serviceworker.js`. It marks its generated files and will
 replace only files carrying that marker; it refuses to overwrite hand-written
-files with those names.
+files with those names. The optional `--title` sets the browser title and
+defaults to `Myplotlib application`.
 
 For a threaded application, let `cargo-myplotlib` select the tested nightly,
 rebuild the standard library with atomics, and supply the shared-memory linker
