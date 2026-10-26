@@ -24,25 +24,32 @@ By default, selecting a streaming view prepares its initial plot without
 starting the calculation. Adjusting its controls rebuilds that initial plot, so
 the Gaussian and Lorentzian inputs and the fit's initial guess can be inspected
 before running the Voigt integration.
-Start, Stop, progress, and status appear in a horizontal Streaming strip between
-the view's control grid and plot. Reset, saving, and compute time remain in the
-app header.
+Start/Stop, an Autoplay toggle, progress, and status appear in a horizontal
+Streaming strip between the view's control grid and plot. Reset, saving, and
+compute time remain in the app header.
 Ready views show the time used to prepare their initial plot; a completed stream
 replaces it with the background job's total time. Changing controls or views
-cancels active work; press Start when the new inputs are ready. The Expected
-error view remains synchronous and computes immediately.
+cancels active work; press Start when the new inputs are ready, or enable
+Autoplay to run automatically. The Expected error view remains synchronous and
+computes immediately.
 
-Each plan can customize its control-strip label and start automatically:
+Autoplay is controlled by the user and is off by default for each view. Turning
+it on starts an idle calculation immediately. It then starts fresh calculations
+when the view's inputs change or the user returns to that view. The setting is
+remembered across input changes and view switches during the session. Turning
+it off lets the current calculation continue; Stop cancels it. Stopping or
+finishing a calculation does not automatically restart it. Reset turns
+Autoplay off for all views.
+
+Each plan can customize its control-strip label:
 
 ```rust
 StreamPlan::new(plot, job)
     .label("Monte Carlo sampling")
-    .autoplay(true)
 ```
 
-Autoplay applies whenever the app prepares a fresh plan, including after its
-controls change or the user returns to its view. The default label is
-`Streaming`, and autoplay is disabled by default.
+The default label is `Streaming`. Autoplay is no longer configured with
+`StreamPlan::autoplay`; use the toggle in the Streaming strip.
 
 Build a threaded WebAssembly site and serve it with cross-origin isolation:
 

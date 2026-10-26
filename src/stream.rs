@@ -28,7 +28,6 @@ pub struct StreamPlan<P> {
     job: StreamJob<P>,
     point_bindings: Vec<PointBinding<P>>,
     label: String,
-    autoplay: bool,
 }
 
 impl<P: 'static> StreamPlan<P> {
@@ -43,23 +42,12 @@ impl<P: 'static> StreamPlan<P> {
             job: Box::new(job),
             point_bindings: Vec::new(),
             label: DEFAULT_STREAM_LABEL.to_owned(),
-            autoplay: false,
         }
     }
 
     /// Sets the heading shown in the stream control strip.
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
-        self
-    }
-
-    /// Sets whether computation starts whenever the app prepares this plan.
-    ///
-    /// Autoplay is disabled by default. When enabled, selecting the view,
-    /// changing its controls, or resetting the app starts the newly prepared
-    /// stream without waiting for the Start button.
-    pub fn autoplay(mut self, autoplay: bool) -> Self {
-        self.autoplay = autoplay;
         self
     }
 
@@ -84,7 +72,6 @@ impl<P: 'static> StreamPlan<P> {
             job: self.job,
             point_bindings: self.point_bindings,
             label: self.label,
-            autoplay: self.autoplay,
         }
     }
 }
@@ -94,7 +81,6 @@ struct StreamPlanParts<P> {
     job: StreamJob<P>,
     point_bindings: Vec<PointBinding<P>>,
     label: String,
-    autoplay: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -276,9 +262,8 @@ impl<P: 'static> StreamState<P> {
             job,
             point_bindings,
             label,
-            autoplay,
         } = plan.into_parts();
-        let mut state = Self {
+        Self {
             plotter,
             job: Some(job),
             point_bindings,
@@ -290,11 +275,7 @@ impl<P: 'static> StreamState<P> {
             started: None,
             elapsed: Duration::ZERO,
             error: None,
-        };
-        if autoplay {
-            state.start();
         }
-        state
     }
 
     pub(crate) fn start(&mut self) {
@@ -504,18 +485,21 @@ mod tests {
     }
 
     #[test]
-    fn configured_stream_uses_its_label_and_starts_automatically() {
+    fn configured_stream_uses_its_label_and_waits_until_started() {
         let (plot, _) = plot_with_series();
         let (started_sender, started_receiver) = mpsc::channel();
         let plan = StreamPlan::<()>::new(plot, move |_| {
             started_sender.send(()).unwrap();
             Ok(())
         })
-        .label("Automatic calculation")
-        .autoplay(true);
-        let state = StreamState::prepare(plan);
+        .label("Custom calculation");
+        let mut state = StreamState::prepare(plan);
 
-        assert_eq!(state.label(), "Automatic calculation");
+        assert_eq!(state.label(), "Custom calculation");
+        assert_eq!(state.status(), StreamStatus::Ready);
+        assert_eq!(started_receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+
+        state.start();
         assert_eq!(state.status(), StreamStatus::Running);
         assert!(state.needs_repaint_poll());
         started_receiver

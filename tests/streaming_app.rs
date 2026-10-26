@@ -12,6 +12,11 @@ use web_time::Instant;
 static RUNS: AtomicUsize = AtomicUsize::new(0);
 static AUTOPLAY_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
 static AUTOPLAY_RUNS: AtomicUsize = AtomicUsize::new(0);
+static AUTOPLAY_INPUT_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
+static AUTOPLAY_INPUT_RUNS: AtomicUsize = AtomicUsize::new(0);
+static AUTOPLAY_WAIT_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
+static AUTOPLAY_WAIT_RUNS: AtomicUsize = AtomicUsize::new(0);
+static AUTOPLAY_WAIT_CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static POLL_CANCELLED: AtomicUsize = AtomicUsize::new(0);
 static UPDATE_PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -49,8 +54,7 @@ fn autoplay_stream(_: &mut Params) -> PlanResult {
         AUTOPLAY_RUNS.fetch_add(1, Ordering::Relaxed);
         Ok(())
     })
-    .label("Automatic calculation")
-    .autoplay(true))
+    .label("Automatic calculation"))
 }
 
 fn input(time: f64) -> egui::RawInput {
@@ -117,6 +121,67 @@ fn repaint_delay(output: &egui::FullOutput) -> Duration {
     output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
 }
 
+struct TestApp<P: 'static> {
+    context: egui::Context,
+    app: App<P>,
+    frame: eframe::Frame,
+    time: f64,
+}
+
+impl<P: Default + 'static> TestApp<P> {
+    fn new(views: &'static [ViewOption<P>]) -> Self {
+        let context = egui::Context::default();
+        let creation = eframe::CreationContext::_new_kittest(context.clone());
+        let app = App::new(&creation, AppDefinition::new("Test", views));
+        Self {
+            context,
+            app,
+            frame: eframe::Frame::_new_kittest(),
+            time: 0.0,
+        }
+    }
+
+    fn update(&mut self, mut input: egui::RawInput) -> egui::FullOutput {
+        use eframe::App as _;
+
+        self.time += 0.1;
+        input.time = Some(self.time);
+        self.context
+            .run(input, |context| self.app.update(context, &mut self.frame))
+    }
+
+    fn idle(&mut self) -> egui::FullOutput {
+        self.update(input(0.0))
+    }
+
+    fn key(&mut self, key: egui::Key) -> egui::FullOutput {
+        self.update(key_input(0.0, key))
+    }
+
+    fn click(&mut self, text: &str) -> egui::FullOutput {
+        let output = self.idle();
+        self.click_at(text_position(&output, text))
+    }
+
+    fn click_at(&mut self, position: egui::Pos2) -> egui::FullOutput {
+        let _ = self.update(pointer_input(0.0, position, true));
+        let _ = self.update(pointer_input(0.0, position, false));
+        self.idle()
+    }
+
+    fn wait_for_status(&mut self, status: &str) -> egui::FullOutput {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let output = self.idle();
+            if contains_text_starting_with(&output, status) {
+                return output;
+            }
+            assert!(Instant::now() < deadline, "stream should reach {status}");
+            std::thread::yield_now();
+        }
+    }
+}
+
 #[test]
 fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
     use eframe::App as _;
@@ -177,55 +242,232 @@ fn streaming_view_runs_in_the_standard_app_and_reaches_finished_state() {
 }
 
 #[test]
-fn configured_stream_uses_its_label_and_autoplays_after_view_reentry() {
-    use eframe::App as _;
-
+fn user_autoplay_is_per_view_and_survives_view_switches_until_reset() {
     AUTOPLAY_PREPARATIONS.store(0, Ordering::Relaxed);
     AUTOPLAY_RUNS.store(0, Ordering::Relaxed);
     const VIEWS: &[ViewOption<Params>] = &[
         ViewOption::streaming("Stream", autoplay_stream, controls),
+        ViewOption::streaming("Manual stream", autoplay_stream, controls),
         ViewOption::new("Immediate", immediate, controls),
     ];
-    let context = egui::Context::default();
-    let creation = eframe::CreationContext::_new_kittest(context.clone());
-    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
-    let mut frame = eframe::Frame::_new_kittest();
+    let mut app = TestApp::new(VIEWS);
 
-    let first = context.run(input(0.0), |context| app.update(context, &mut frame));
+    let first = app.idle();
     assert!(contains_text_starting_with(&first, "Automatic calculation"));
-    assert!(contains_text_starting_with(&first, "Running"));
-    assert!(contains_text_starting_with(&first, "Stop"));
+    assert!(contains_text_starting_with(&first, "Ready"));
+    assert!(contains_text_starting_with(&first, "Autoplay: Off"));
     assert_eq!(AUTOPLAY_PREPARATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 0);
 
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while AUTOPLAY_RUNS.load(Ordering::Relaxed) < 1 && Instant::now() < deadline {
-        std::thread::yield_now();
+    let _ = app.click("Autoplay: Off");
+    let finished = app.wait_for_status("Finished");
+    assert!(contains_text_starting_with(&finished, "Autoplay: On"));
+    assert_eq!(AUTOPLAY_PREPARATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 1);
+
+    // Completion leaves autoplay enabled without repeatedly running the job.
+    for _ in 0..3 {
+        let settled = app.idle();
+        assert!(contains_text_starting_with(&settled, "Finished"));
     }
     assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 1);
 
-    let immediate_output = context.run(key_input(0.1, egui::Key::Num2), |context| {
-        app.update(context, &mut frame)
-    });
+    let manual = app.key(egui::Key::Num2);
+    assert!(contains_text_starting_with(&manual, "Ready"));
+    assert!(contains_text_starting_with(&manual, "Autoplay: Off"));
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 1);
+
+    let immediate_output = app.key(egui::Key::Num3);
     assert!(contains_text_starting_with(
         &immediate_output,
         "Immediate signal"
     ));
+    assert!(!contains_text_starting_with(&immediate_output, "Autoplay:"));
 
-    let restarted = context.run(key_input(0.2, egui::Key::Num1), |context| {
-        app.update(context, &mut frame)
-    });
+    let restarted = app.key(egui::Key::Num1);
     assert!(contains_text_starting_with(
         &restarted,
         "Automatic calculation"
     ));
     assert!(contains_text_starting_with(&restarted, "Running"));
-    assert_eq!(AUTOPLAY_PREPARATIONS.load(Ordering::Relaxed), 2);
-
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while AUTOPLAY_RUNS.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
+    assert!(contains_text_starting_with(&restarted, "Autoplay: On"));
+    let _ = app.wait_for_status("Finished");
+    assert_eq!(AUTOPLAY_PREPARATIONS.load(Ordering::Relaxed), 3);
     assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 2);
+
+    let disabled = app.click("Autoplay: On");
+    assert!(contains_text_starting_with(&disabled, "Autoplay: Off"));
+    assert!(contains_text_starting_with(&disabled, "Finished"));
+    let _ = app.key(egui::Key::Num3);
+    let manual = app.key(egui::Key::Num1);
+    assert!(contains_text_starting_with(&manual, "Ready"));
+    assert!(contains_text_starting_with(&manual, "Autoplay: Off"));
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 2);
+
+    let _ = app.click("Start");
+    let finished = app.wait_for_status("Finished");
+    assert!(contains_text_starting_with(&finished, "Autoplay: Off"));
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 3);
+
+    // Enabling autoplay on a finished plot starts a fresh calculation.
+    let _ = app.click("Autoplay: Off");
+    let _ = app.wait_for_status("Finished");
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 4);
+    assert_eq!(AUTOPLAY_PREPARATIONS.load(Ordering::Relaxed), 5);
+
+    let reset = app.key(egui::Key::R);
+    assert!(contains_text_starting_with(&reset, "Ready"));
+    assert!(contains_text_starting_with(&reset, "Autoplay: Off"));
+    assert_eq!(AUTOPLAY_RUNS.load(Ordering::Relaxed), 4);
+}
+
+#[derive(Default)]
+struct AutoplayInputParams {
+    value: u64,
+}
+
+fn autoplay_input_controls(params: &mut AutoplayInputParams) -> SliderGrid<'_> {
+    SliderGrid::new(
+        1,
+        [SliderGroup::new(
+            "Inputs",
+            [Slider::new("Value", &mut params.value, 0..=100)],
+        )],
+    )
+}
+
+fn autoplay_input_stream(
+    params: &mut AutoplayInputParams,
+) -> StreamPlanResult<AutoplayInputParams> {
+    AUTOPLAY_INPUT_PREPARATIONS.fetch_add(1, Ordering::Relaxed);
+    let mut plot = Plotter::new();
+    plot.add_points(Vec::new());
+    plot.title(format!("Input: {}", params.value));
+    Ok(StreamPlan::new(plot, |_| {
+        AUTOPLAY_INPUT_RUNS.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }))
+}
+
+#[test]
+fn input_changes_run_only_while_user_autoplay_is_enabled() {
+    AUTOPLAY_INPUT_PREPARATIONS.store(0, Ordering::Relaxed);
+    AUTOPLAY_INPUT_RUNS.store(0, Ordering::Relaxed);
+    const VIEWS: &[ViewOption<AutoplayInputParams>] = &[ViewOption::streaming(
+        "Stream",
+        autoplay_input_stream,
+        autoplay_input_controls,
+    )];
+    let mut app = TestApp::new(VIEWS);
+    let _ = app.idle();
+    let ready = app.idle();
+    let slider_rect = ready
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.rect.height() <= 8.0 && (50.0..=150.0).contains(&rect.rect.width()) =>
+            {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .expect("the input slider should be visible");
+
+    let manual = app.click_at(slider_rect.lerp_inside(egui::vec2(0.75, 0.5)));
+    assert!(contains_text_starting_with(&manual, "Ready"));
+    assert!(!contains_text_starting_with(&manual, "Input: 0"));
+    assert_eq!(AUTOPLAY_INPUT_PREPARATIONS.load(Ordering::Relaxed), 2);
+    assert_eq!(AUTOPLAY_INPUT_RUNS.load(Ordering::Relaxed), 0);
+
+    let _ = app.click("Autoplay: Off");
+    let _ = app.wait_for_status("Finished");
+    assert_eq!(AUTOPLAY_INPUT_PREPARATIONS.load(Ordering::Relaxed), 2);
+    assert_eq!(AUTOPLAY_INPUT_RUNS.load(Ordering::Relaxed), 1);
+
+    let _ = app.click_at(slider_rect.lerp_inside(egui::vec2(0.25, 0.5)));
+    let finished = app.wait_for_status("Finished");
+    assert!(contains_text_starting_with(&finished, "Autoplay: On"));
+    assert_eq!(AUTOPLAY_INPUT_PREPARATIONS.load(Ordering::Relaxed), 3);
+    assert_eq!(AUTOPLAY_INPUT_RUNS.load(Ordering::Relaxed), 2);
+
+    let _ = app.click("Autoplay: On");
+    let manual = app.click_at(slider_rect.center());
+    assert!(contains_text_starting_with(&manual, "Ready"));
+    assert!(contains_text_starting_with(&manual, "Autoplay: Off"));
+    assert_eq!(AUTOPLAY_INPUT_PREPARATIONS.load(Ordering::Relaxed), 4);
+    assert_eq!(AUTOPLAY_INPUT_RUNS.load(Ordering::Relaxed), 2);
+}
+
+fn autoplay_waiting_stream(_: &mut Params) -> PlanResult {
+    AUTOPLAY_WAIT_PREPARATIONS.fetch_add(1, Ordering::Relaxed);
+    let mut plot = Plotter::new();
+    plot.add_points(Vec::new());
+    Ok(StreamPlan::new(plot, |stream| {
+        AUTOPLAY_WAIT_RUNS.fetch_add(1, Ordering::Relaxed);
+        loop {
+            if stream.checkpoint().is_err() {
+                AUTOPLAY_WAIT_CANCELLED.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            std::thread::yield_now();
+        }
+    }))
+}
+
+#[test]
+fn toggling_autoplay_preserves_active_work_and_stop_does_not_restart_it() {
+    AUTOPLAY_WAIT_PREPARATIONS.store(0, Ordering::Relaxed);
+    AUTOPLAY_WAIT_RUNS.store(0, Ordering::Relaxed);
+    AUTOPLAY_WAIT_CANCELLED.store(0, Ordering::Relaxed);
+    const VIEWS: &[ViewOption<Params>] = &[ViewOption::streaming(
+        "Stream",
+        autoplay_waiting_stream,
+        controls,
+    )];
+    let mut app = TestApp::new(VIEWS);
+
+    let _ = app.click("Autoplay: Off");
+    let running = app.wait_for_status("Running");
+    assert!(contains_text_starting_with(&running, "Autoplay: On"));
+
+    let disabled = app.click("Autoplay: On");
+    assert!(contains_text_starting_with(&disabled, "Running"));
+    assert!(contains_text_starting_with(&disabled, "Autoplay: Off"));
+    assert_eq!(AUTOPLAY_WAIT_CANCELLED.load(Ordering::Relaxed), 0);
+
+    let enabled = app.click("Autoplay: Off");
+    assert!(contains_text_starting_with(&enabled, "Running"));
+    assert!(contains_text_starting_with(&enabled, "Autoplay: On"));
+    assert_eq!(AUTOPLAY_WAIT_PREPARATIONS.load(Ordering::Relaxed), 1);
+    assert_eq!(AUTOPLAY_WAIT_CANCELLED.load(Ordering::Relaxed), 0);
+
+    let _ = app.click("Stop");
+    let stopped = app.wait_for_status("Stopped");
+    assert!(contains_text_starting_with(&stopped, "Autoplay: On"));
+    for _ in 0..3 {
+        let stopped = app.idle();
+        assert!(contains_text_starting_with(&stopped, "Stopped"));
+    }
+    assert_eq!(AUTOPLAY_WAIT_RUNS.load(Ordering::Relaxed), 1);
+    assert_eq!(AUTOPLAY_WAIT_CANCELLED.load(Ordering::Relaxed), 1);
+
+    let _ = app.click("Start");
+    let _ = app.wait_for_status("Running");
+    let _ = app.click("Stop");
+    let _ = app.wait_for_status("Stopped");
+    assert_eq!(AUTOPLAY_WAIT_RUNS.load(Ordering::Relaxed), 2);
+    assert_eq!(AUTOPLAY_WAIT_CANCELLED.load(Ordering::Relaxed), 2);
+
+    let disabled = app.click("Autoplay: On");
+    assert!(contains_text_starting_with(&disabled, "Stopped"));
+    let _ = app.click("Autoplay: Off");
+    let _ = app.wait_for_status("Running");
+    let _ = app.click("Stop");
+    let _ = app.wait_for_status("Stopped");
+    assert_eq!(AUTOPLAY_WAIT_PREPARATIONS.load(Ordering::Relaxed), 3);
+    assert_eq!(AUTOPLAY_WAIT_RUNS.load(Ordering::Relaxed), 3);
+    assert_eq!(AUTOPLAY_WAIT_CANCELLED.load(Ordering::Relaxed), 3);
 }
 
 fn waiting_stream(_: &mut Params) -> PlanResult {
@@ -388,7 +630,7 @@ fn updating_stream(_: &mut UpdatingParams) -> StreamPlanResult<UpdatingParams> {
 }
 
 #[test]
-fn stream_parameter_updates_refresh_controls_and_bound_points_without_preparing_again() {
+fn autoplay_parameter_updates_refresh_controls_and_bound_points_without_preparing_again() {
     use eframe::App as _;
 
     UPDATE_PREPARATIONS.store(0, Ordering::Relaxed);
@@ -413,17 +655,20 @@ fn stream_parameter_updates_refresh_controls_and_bound_points_without_preparing_
     let stream_heading = text_position(&ready, "Streaming");
     let worker_heading = text_position(&ready, "Worker state");
     let start = text_position(&ready, "Start");
+    let autoplay = text_position(&ready, "Autoplay: Off");
     assert!(stream_heading.y > worker_heading.y);
     assert!(start.x > stream_heading.x);
     assert!((start.y - stream_heading.y).abs() < 8.0);
+    assert!(autoplay.x > start.x);
+    assert!((autoplay.y - start.y).abs() < 8.0);
     assert_eq!(UPDATE_PREPARATIONS.load(Ordering::Relaxed), 1);
 
     frame_time += 0.01;
-    let _ = context.run(pointer_input(frame_time, start, true), |context| {
+    let _ = context.run(pointer_input(frame_time, autoplay, true), |context| {
         app.update(context, &mut frame)
     });
     frame_time += 0.01;
-    let _ = context.run(pointer_input(frame_time, start, false), |context| {
+    let _ = context.run(pointer_input(frame_time, autoplay, false), |context| {
         app.update(context, &mut frame)
     });
 
@@ -433,7 +678,8 @@ fn stream_parameter_updates_refresh_controls_and_bound_points_without_preparing_
         frame_time += 0.01;
         let output = context.run(input(frame_time), |context| app.update(context, &mut frame));
         updated = contains_text_starting_with(&output, "42")
-            && contains_text_starting_with(&output, "Finished");
+            && contains_text_starting_with(&output, "Finished")
+            && contains_text_starting_with(&output, "Autoplay: On");
         if updated {
             break;
         }

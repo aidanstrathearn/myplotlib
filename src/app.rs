@@ -66,8 +66,9 @@ impl<P> ViewOption<P> {
 
     /// Creates a view whose plot is updated by background computation.
     ///
-    /// The initial plot is shown in a ready state. Computation begins only
-    /// after the user presses Start.
+    /// The initial plot is shown in a ready state. Users can press Start or
+    /// enable Autoplay to run it automatically when its inputs change or they
+    /// return to the view. Autoplay is off by default and is tracked per view.
     #[cfg(feature = "streaming")]
     pub const fn streaming(
         title: &'static str,
@@ -203,10 +204,11 @@ impl<P> PlotState<P> {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "streaming"), allow(dead_code))]
+#[cfg(feature = "streaming")]
 enum StreamCommand {
     Start,
     Stop,
+    ToggleAutoplay,
 }
 
 #[derive(Default)]
@@ -230,12 +232,16 @@ impl FigureUiState {
 
 struct ViewUiState {
     figure: FigureUiState,
+    #[cfg(feature = "streaming")]
+    autoplay: bool,
 }
 
 impl ViewUiState {
     fn single_axes() -> Self {
         Self {
             figure: FigureUiState::single_axes(),
+            #[cfg(feature = "streaming")]
+            autoplay: false,
         }
     }
 }
@@ -573,7 +579,7 @@ where
 
                         ui.separator();
 
-                        let command = match status {
+                        let mut command = match status {
                             StreamStatus::Running => {
                                 ui.button("Stop").clicked().then_some(StreamCommand::Stop)
                             }
@@ -588,6 +594,24 @@ where
                                 ui.button("Start").clicked().then_some(StreamCommand::Start)
                             }
                         };
+
+                        let autoplay = self.view_ui[self.selected_view].autoplay;
+                        if ui
+                            .add(
+                                egui::Button::new(if autoplay {
+                                    "Autoplay: On"
+                                } else {
+                                    "Autoplay: Off"
+                                })
+                                .selected(autoplay),
+                            )
+                            .on_hover_text(
+                                "Automatically run when inputs change or you return to this view",
+                            )
+                            .clicked()
+                        {
+                            command = Some(StreamCommand::ToggleAutoplay);
+                        }
 
                         if let Some(error) = error {
                             ui.colored_label(ui.visuals().error_fg_color, status.label())
@@ -628,7 +652,13 @@ where
                 let (result, compute_time) = timed(|| stream(&mut self.params));
                 self.compute_time = Some(compute_time);
                 self.plot_state = Some(match result {
-                    Ok(plan) => PlotState::Streaming(StreamState::prepare(plan)),
+                    Ok(plan) => {
+                        let mut state = StreamState::prepare(plan);
+                        if self.view_ui[self.selected_view].autoplay {
+                            state.start();
+                        }
+                        PlotState::Streaming(state)
+                    }
                     Err(error) => PlotState::immediate(Err(error)),
                 });
             }
@@ -688,6 +718,13 @@ where
 
     #[cfg(feature = "streaming")]
     fn start_stream(&mut self) {
+        if matches!(
+            self.plot_state.as_ref(),
+            Some(PlotState::Streaming(state))
+                if matches!(state.status(), StreamStatus::Running | StreamStatus::Stopping)
+        ) {
+            return;
+        }
         let is_ready = matches!(
             self.plot_state.as_ref(),
             Some(PlotState::Streaming(state)) if state.status() == StreamStatus::Ready
@@ -768,17 +805,18 @@ where
         }
 
         #[cfg(feature = "streaming")]
-        let stream_command = self.draw_stream_control_row(ui);
-        #[cfg(not(feature = "streaming"))]
-        let stream_command = None;
-
-        if matches!(stream_command, Some(StreamCommand::Start)) {
-            #[cfg(feature = "streaming")]
-            self.start_stream();
-            ui.ctx().request_repaint();
-        } else if matches!(stream_command, Some(StreamCommand::Stop)) {
-            #[cfg(feature = "streaming")]
-            self.stop_stream();
+        if let Some(command) = self.draw_stream_control_row(ui) {
+            match command {
+                StreamCommand::Start => self.start_stream(),
+                StreamCommand::Stop => self.stop_stream(),
+                StreamCommand::ToggleAutoplay => {
+                    let autoplay = &mut self.view_ui[self.selected_view].autoplay;
+                    *autoplay = !*autoplay;
+                    if *autoplay {
+                        self.start_stream();
+                    }
+                }
+            }
             ui.ctx().request_repaint();
         }
 
