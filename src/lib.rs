@@ -3,6 +3,7 @@ mod appmenu;
 mod controls;
 mod data_import;
 mod figure;
+mod heatmap;
 mod plotter;
 mod save;
 #[cfg(feature = "streaming")]
@@ -20,6 +21,7 @@ pub use app::{StreamAction, StreamPlanResult};
 pub use appmenu::AppMenu;
 pub use controls::{Slider, SliderGrid, SliderGroup};
 pub use figure::Figure;
+pub use heatmap::Heatmap;
 pub use plotter::{
     AxisScale, PlotLine, Plotter, ReferenceLine, SeriesId, SummaryItem, YAxis, YAxisId, YAxisSide,
 };

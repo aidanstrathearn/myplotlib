@@ -513,6 +513,7 @@ pub struct SummaryItem {
 }
 
 pub struct Plotter {
+    heatmap: Option<crate::Heatmap>,
     series: Vec<PlotLine>,
     horizontal_lines: Vec<ReferenceLine>,
     vertical_lines: Vec<ReferenceLine>,
@@ -528,6 +529,7 @@ pub struct Plotter {
 impl Default for Plotter {
     fn default() -> Self {
         Self {
+            heatmap: None,
             series: Vec::new(),
             horizontal_lines: Vec::new(),
             vertical_lines: Vec::new(),
@@ -543,6 +545,23 @@ impl Default for Plotter {
 }
 
 impl Plotter {
+    /// Sets the single heatmap on the primary axes, replacing any previous grid.
+    /// Values are row-major with row zero at the bottom; bounds are outer cell edges.
+    /// Panics for empty/mismatched dimensions or invalid bounds; see [`crate::Heatmap::new`].
+    pub fn heatmap(
+        &mut self,
+        values: Vec<f64>,
+        rows: usize,
+        columns: usize,
+        x_bounds: [f64; 2],
+        y_bounds: [f64; 2],
+    ) -> &mut crate::Heatmap {
+        self.heatmap = Some(crate::Heatmap::new(
+            values, rows, columns, x_bounds, y_bounds,
+        ));
+        self.heatmap.as_mut().unwrap()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -805,6 +824,11 @@ impl Plotter {
             }
         };
 
+        if let Some(heatmap) = &self.heatmap {
+            for value in heatmap.y_bounds {
+                include(YAxisId::PRIMARY, value);
+            }
+        }
         for series in &self.series {
             self.y_axis(series.y_axis);
             for point in &series.points {
@@ -1085,6 +1109,43 @@ impl Plotter {
         id: impl std::hash::Hash,
         imported: &[ImportedSeries],
     ) -> egui::Rect {
+        if let Some(heatmap) = &self.heatmap {
+            assert!(
+                self.x_scale == AxisScale::Linear
+                    && self.primary_y_axis().scale == AxisScale::Linear,
+                "heatmaps require linear x and primary y axes"
+            );
+            let rect = ui.available_rect_before_wrap();
+            let bar_width = 100.0_f32.min(rect.width() * 0.25);
+            let mut bar_ui =
+                ui.new_child(egui::UiBuilder::new().id_salt("heatmap_colorbar").max_rect(
+                    egui::Rect::from_min_max(
+                        egui::pos2(rect.right() - bar_width, rect.top()),
+                        rect.max,
+                    ),
+                ));
+            bar_ui.set_clip_rect(bar_ui.max_rect());
+            heatmap.colorbar(&mut bar_ui);
+            let mut plot_ui =
+                ui.new_child(egui::UiBuilder::new().id_salt("heatmap_plot").max_rect(
+                    egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right() - bar_width - 8.0, rect.bottom()),
+                    ),
+                ));
+            let result = self.show_plot_ui(&mut plot_ui, id, imported);
+            ui.advance_cursor_after_rect(rect);
+            return result;
+        }
+        self.show_plot_ui(ui, id, imported)
+    }
+
+    fn show_plot_ui(
+        &self,
+        ui: &mut egui::Ui,
+        id: impl std::hash::Hash,
+        imported: &[ImportedSeries],
+    ) -> egui::Rect {
         let plot_id = ui.make_persistent_id(egui::Id::new(&id));
         let y_limits_pending = self.y_axes.iter().fold(false, |pending, axis| {
             axis.limits_pending.replace(false) || pending
@@ -1279,6 +1340,17 @@ impl Plotter {
                 y_limits_pending || twin_domains_refreshed,
                 changed_scales,
             );
+            if let Some(heatmap) = &self.heatmap {
+                let [left, right] = heatmap.x_bounds;
+                let [bottom, top] = heatmap.y_bounds;
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "",
+                    heatmap.texture(plot_ui.ctx()),
+                    PlotPoint::new(left + (right - left) / 2.0, bottom + (top - bottom) / 2.0),
+                    egui::vec2((right - left) as f32, (top - bottom) as f32),
+                ));
+                heatmap.hover(plot_ui);
+            }
             self.add_series(plot_ui, series_segments);
             self.add_horizontal_lines(plot_ui, horizontal_lines);
             self.add_vertical_lines(plot_ui, vertical_lines);
@@ -1297,6 +1369,44 @@ impl Plotter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heatmap_auto_bounds_and_navigation_are_preserved() {
+        let mut plot = Plotter::new();
+        plot.heatmap(vec![1.0], 1, 1, [10.0, 20.0], [30.0, 50.0]);
+        let context = egui::Context::default();
+        let mut plot_id = egui::Id::NULL;
+        let mut draw = || {
+            let _ = context.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    plot_id = ui.make_persistent_id(egui::Id::new("heatmap_bounds"));
+                    plot.show_plot_ui(ui, "heatmap_bounds", &[]);
+                });
+            });
+            plot_id
+        };
+        let id = draw();
+        let mut memory = PlotMemory::load(&context, id).unwrap();
+        assert!(memory.bounds().min()[0] <= 10.0 && memory.bounds().max()[0] >= 20.0);
+        assert!(memory.bounds().min()[1] <= 30.0 && memory.bounds().max()[1] >= 50.0);
+        let navigated = egui_plot::PlotBounds::from_min_max([12.0, 35.0], [15.0, 40.0]);
+        memory.set_bounds(navigated);
+        memory.auto_bounds = egui::Vec2b::FALSE;
+        memory.store(&context, id);
+        draw();
+        assert_eq!(*PlotMemory::load(&context, id).unwrap().bounds(), navigated);
+    }
+
+    #[test]
+    fn heatmap_extent_sets_primary_twin_domain() {
+        let mut plot = Plotter::new();
+        plot.heatmap(vec![1.0], 1, 1, [10.0, 20.0], [30.0, 50.0]);
+        let secondary = plot.add_y_axis(YAxisSide::Right);
+        plot.plot(&[10.0, 20.0], &[100.0, 200.0]).y_axis(secondary);
+        let domains = plot.candidate_y_domains(&[]);
+        assert_eq!(domains[0].range(), (30.0, 50.0));
+        assert_eq!(domains[1].range(), (100.0, 200.0));
+    }
 
     #[test]
     fn series_ids_update_existing_data_without_changing_its_identity() {

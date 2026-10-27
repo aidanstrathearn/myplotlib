@@ -90,3 +90,61 @@ fn supports_the_public_subplot_api() {
         let _ = (figure, show);
     }
 }
+
+#[test]
+fn heatmap_renders_with_overlays_and_caches_its_texture() {
+    use eframe::egui;
+    let mut plot = Plotter::new();
+    plot.heatmap(vec![0.0, 1.0, 2.0, 3.0], 2, 2, [10.0, 20.0], [30.0, 50.0])
+        .color_limits(0.0, 3.0)
+        .label("Value");
+    plot.plot(&[10.0, 20.0], &[30.0, 50.0]).label("Overlay");
+    let context = egui::Context::default();
+    let draw = || {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    plot.show_ui(ui, "heatmap");
+                });
+            },
+        )
+    };
+    let first = draw();
+    assert!(!first.shapes.is_empty());
+    assert!(
+        first
+            .textures_delta
+            .set
+            .iter()
+            .any(|(_, delta)| delta.image.size() == [2, 2])
+    );
+    let second = draw();
+    assert!(
+        !second
+            .textures_delta
+            .set
+            .iter()
+            .any(|(_, delta)| delta.image.size() == [2, 2])
+    );
+}
+
+#[test]
+#[should_panic(expected = "heatmaps require linear")]
+fn heatmap_rejects_logarithmic_spatial_axes() {
+    let mut plot = Plotter::new();
+    plot.heatmap(vec![1.0], 1, 1, [1.0, 2.0], [1.0, 2.0]);
+    plot.xscale(AxisScale::Log10);
+    let context = eframe::egui::Context::default();
+    let _ = context.run(Default::default(), |ctx| {
+        eframe::egui::CentralPanel::default().show(ctx, |ui| {
+            plot.show_ui(ui, "heatmap");
+        });
+    });
+}
