@@ -734,6 +734,22 @@ impl Plotter {
         self.summary.last_mut().unwrap()
     }
 
+    /// Updates the first summary with this label, or adds it if absent.
+    pub fn set_summary(
+        &mut self,
+        label: impl Into<String>,
+        value: impl Display,
+    ) -> &mut SummaryItem {
+        let label = label.into();
+        if let Some(index) = self.summary.iter().position(|item| item.label == label) {
+            let item = &mut self.summary[index];
+            item.value = value.to_string();
+            item
+        } else {
+            self.add_summary(label, value)
+        }
+    }
+
     pub fn xlabel(&mut self, label: impl Into<String>) {
         self.x_label = label.into();
     }
@@ -1369,6 +1385,22 @@ impl Plotter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_updates_preserve_order_and_add_missing_labels() {
+        let mut plot = Plotter::new();
+        plot.add_summary("Variance", "Waiting");
+        plot.add_summary("Duration", "1 ms");
+        plot.set_summary("Variance", "2e-6");
+        plot.set_summary("RMS", "1.414e-3");
+        assert_eq!(plot.summary.len(), 3);
+        assert_eq!(plot.summary[0].label, "Variance");
+        assert_eq!(plot.summary[0].value, "2e-6");
+        assert_eq!(plot.summary[1].label, "Duration");
+        assert_eq!(plot.summary[1].value, "1 ms");
+        assert_eq!(plot.summary[2].label, "RMS");
+        assert_eq!(plot.summary[2].value, "1.414e-3");
+    }
 
     #[test]
     fn heatmap_auto_bounds_and_navigation_are_preserved() {

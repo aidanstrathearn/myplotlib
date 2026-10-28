@@ -159,6 +159,12 @@ impl<P: 'static> StreamContext<P> {
         self.send(StreamUpdate::Clear(series))
     }
 
+    /// Updates a labeled plot summary on the UI thread, or adds it if absent.
+    /// Uses the same bounded, cancellation-aware queue as point updates.
+    pub fn set_summary(&self, label: impl Into<String>, value: impl Display) -> StreamResult {
+        self.send(StreamUpdate::Summary(label.into(), value.to_string()))
+    }
+
     /// Reports completion in the range `0.0..=1.0`.
     pub fn set_progress(&self, progress: f32) -> StreamResult {
         self.send(StreamUpdate::Progress(progress.clamp(0.0, 1.0)))
@@ -208,6 +214,7 @@ enum StreamUpdate<P> {
     Replace(SeriesId, Points),
     Clear(SeriesId),
     Progress(f32),
+    Summary(String, String),
     UpdateParams(ParamUpdate<P>),
     Finished(JobOutcome, Duration),
 }
@@ -343,6 +350,9 @@ impl<P: 'static> StreamState<P> {
                     self.plotter.clear_points(series);
                 }
                 StreamUpdate::Progress(progress) => self.progress = Some(progress),
+                StreamUpdate::Summary(label, value) => {
+                    self.plotter.set_summary(label, value);
+                }
                 StreamUpdate::UpdateParams(update) => {
                     update(params);
                     params_updated = true;

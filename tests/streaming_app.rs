@@ -691,3 +691,33 @@ fn autoplay_parameter_updates_refresh_controls_and_bound_points_without_preparin
     assert_eq!(UPDATE_BINDINGS.load(Ordering::Relaxed), 1);
     assert_eq!(UPDATE_PREPARATIONS.load(Ordering::Relaxed), 1);
 }
+
+fn summary_stream(_: &mut Params) -> PlanResult {
+    let mut plot = Plotter::new();
+    plot.add_summary("Variance", "Waiting");
+    Ok(StreamPlan::new(plot, |stream| {
+        stream.set_summary("Variance", "1e-6")?;
+        stream.set_summary("Variance", "2e-6")?;
+        stream.set_summary("RMS", "1.414e-3")?;
+        Ok(())
+    }))
+}
+
+#[test]
+fn streamed_summaries_update_existing_values_and_display_new_values() {
+    const VIEWS: &[ViewOption<Params>] =
+        &[ViewOption::streaming("Stream", summary_stream, controls)];
+    let mut app = TestApp::new(VIEWS);
+    let ready = app.idle();
+    assert!(contains_text_starting_with(&ready, "Waiting"));
+    app.click("Start");
+    let finished = app.wait_for_status("Finished");
+    assert!(contains_text_starting_with(&finished, "2e-6"));
+    assert!(contains_text_starting_with(&finished, "1.414e-3"));
+    assert!(!contains_text_starting_with(&finished, "Waiting"));
+    assert!(!contains_text_starting_with(&finished, "1e-6"));
+    let labels = finished.shapes.iter().filter(|shape| {
+        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Variance")
+    }).count();
+    assert_eq!(labels, 1);
+}
