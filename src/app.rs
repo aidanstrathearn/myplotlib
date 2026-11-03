@@ -18,6 +18,7 @@ pub type StreamPlanResult<P> = std::result::Result<crate::StreamPlan<P>, AppErro
 #[cfg(feature = "streaming")]
 pub type StreamAction<P> = fn(&mut P) -> StreamPlanResult<P>;
 pub type ControlsAction<P> = for<'a> fn(&'a mut P) -> SliderGrid<'a>;
+type DisplayControls<P> = (ControlsAction<P>, fn(&P, &mut Plotter));
 
 #[cfg(feature = "streaming")]
 const STREAM_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
@@ -49,6 +50,7 @@ pub struct ViewOption<P> {
     title: &'static str,
     action: ViewAction<P>,
     controls: ControlsAction<P>,
+    display_controls: Option<DisplayControls<P>>,
 }
 
 impl<P> ViewOption<P> {
@@ -61,6 +63,7 @@ impl<P> ViewOption<P> {
             title,
             action: ViewAction::Immediate(plot),
             controls,
+            display_controls: None,
         }
     }
 
@@ -79,7 +82,20 @@ impl<P> ViewOption<P> {
             title,
             action: ViewAction::Streaming(stream),
             controls,
+            display_controls: None,
         }
+    }
+
+    /// Adds controls that change the presentation without recomputing the plot
+    /// or stopping a running stream. `update` runs before each plot draw and
+    /// should only update inexpensive display settings on the existing plotter.
+    pub const fn display_controls(
+        mut self,
+        controls: ControlsAction<P>,
+        update: fn(&P, &mut Plotter),
+    ) -> Self {
+        self.display_controls = Some((controls, update));
+        self
     }
 }
 
@@ -199,6 +215,15 @@ impl<P> PlotState<P> {
             Self::Immediate(Err(_), _) => None,
             #[cfg(feature = "streaming")]
             Self::Streaming(state) => Some(&state.plotter),
+        }
+    }
+
+    fn plotter_mut(&mut self) -> Option<&mut Plotter> {
+        match self {
+            Self::Immediate(Ok(plotter), _) => Some(plotter),
+            Self::Immediate(Err(_), _) => None,
+            #[cfg(feature = "streaming")]
+            Self::Streaming(state) => Some(&mut state.plotter),
         }
     }
 }
@@ -537,8 +562,17 @@ where
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     let controls = self.selected_option().controls;
+                    let display_controls = self.selected_option().display_controls;
                     let grid = controls(&mut self.params);
-                    grid.show(ui)
+                    let changed = grid.show(ui);
+                    if let Some((controls, _)) = display_controls {
+                        ui.push_id("display-controls", |ui| {
+                            if controls(&mut self.params).show(ui) {
+                                ui.ctx().request_repaint();
+                            }
+                        });
+                    }
+                    changed
                 })
                 .inner
         })
@@ -665,7 +699,17 @@ where
         }
     }
 
+    fn update_display(&mut self) {
+        let Some((_, update)) = self.selected_option().display_controls else {
+            return;
+        };
+        if let Some(plotter) = self.plot_state.as_mut().and_then(PlotState::plotter_mut) {
+            update(&self.params, plotter);
+        }
+    }
+
     fn draw_plot(&mut self, ui: &mut Ui) -> Option<egui::Rect> {
+        self.update_display();
         let selected_view = self.selected_view;
         match &self.plot_state {
             Some(PlotState::Immediate(Ok(plotter), _)) => {
@@ -918,4 +962,178 @@ where
     P: Default + 'static,
 {
     web::mount(canvas, App::from_definition(definition)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Slider, SliderGroup};
+
+    #[derive(Default)]
+    struct Params {
+        offset: f64,
+        preparations: usize,
+        #[cfg(feature = "streaming")]
+        commands: Option<std::sync::mpsc::Receiver<()>>,
+        #[cfg(feature = "streaming")]
+        published: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    fn controls(_: &mut Params) -> SliderGrid<'_> {
+        SliderGrid::empty()
+    }
+
+    fn display_controls(params: &mut Params) -> SliderGrid<'_> {
+        SliderGrid::new(
+            1,
+            [SliderGroup::new(
+                "Display",
+                [Slider::new("Y offset", &mut params.offset, -1.0..=1.0).step_by(0.001)],
+            )],
+        )
+    }
+
+    fn update(params: &Params, plot: &mut Plotter) {
+        plot.y_offset(params.offset);
+        plot.title(params.offset.to_string());
+    }
+
+    fn draw_controls(
+        app: &mut App<Params>,
+        context: &egui::Context,
+        key: Option<egui::Key>,
+    ) -> bool {
+        let events = key
+            .into_iter()
+            .flat_map(|key| {
+                [true, false].map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+            })
+            .collect();
+        let mut changed = false;
+        let _ = context.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| changed = app.draw_control_grid(ui));
+            },
+        );
+        changed
+    }
+
+    #[test]
+    fn display_slider_edits_do_not_request_plot_preparation() {
+        fn plot(params: &mut Params) -> AppResult {
+            params.preparations += 1;
+            let mut plot = Plotter::new();
+            plot.add_points(vec![[0.0, 1.0]]);
+            Ok(plot)
+        }
+        const VIEWS: &[ViewOption<Params>] =
+            &[ViewOption::new("Plot", plot, controls).display_controls(display_controls, update)];
+        let mut app = App::from_definition(AppDefinition::new("Test", VIEWS));
+        app.prepare_plot();
+        let context = egui::Context::default();
+        assert!(!draw_controls(&mut app, &context, None));
+        assert!(!draw_controls(&mut app, &context, Some(egui::Key::Tab)));
+        assert!(!draw_controls(
+            &mut app,
+            &context,
+            Some(egui::Key::ArrowRight)
+        ));
+        assert!(
+            app.params.offset > 0.0,
+            "the display slider must actually change"
+        );
+        app.update_display();
+        assert_eq!(app.params.preparations, 1);
+        assert_eq!(
+            app.plot_state.as_ref().unwrap().plotter().unwrap().title,
+            app.params.offset.to_string()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "streaming")]
+    fn display_updates_preserve_running_and_finished_streams() {
+        fn stream(params: &mut Params) -> StreamPlanResult<Params> {
+            params.preparations += 1;
+            let commands = params.commands.take().unwrap();
+            let published = params.published.take().unwrap();
+            let mut plot = Plotter::new();
+            let series = plot.add_points(Vec::new()).id();
+            Ok(crate::StreamPlan::new(plot, move |stream| {
+                stream.replace(series, vec![[0.0, 0.5]])?;
+                stream.set_progress(0.25)?;
+                published.send(())?;
+                commands.recv_timeout(Duration::from_secs(2))?;
+                stream.replace(series, vec![[0.0, 0.75]])?;
+                stream.set_progress(0.75)?;
+                published.send(())?;
+                commands.recv_timeout(Duration::from_secs(2))?;
+                Ok(())
+            }))
+        }
+        const VIEWS: &[ViewOption<Params>] = &[ViewOption::streaming("Plot", stream, controls)
+            .display_controls(display_controls, update)];
+        let mut app = App::from_definition(AppDefinition::new("Test", VIEWS));
+        let (commands, receiver) = std::sync::mpsc::channel();
+        let (sender, published) = std::sync::mpsc::channel();
+        app.params.commands = Some(receiver);
+        app.params.published = Some(sender);
+        app.prepare_plot();
+        app.start_stream();
+        let context = egui::Context::default();
+        published.recv_timeout(Duration::from_secs(2)).unwrap();
+        app.maintain_stream(&context);
+        for offset in [0.25, -0.25] {
+            app.params.offset = offset;
+            app.update_display();
+            let Some(PlotState::Streaming(state)) = &app.plot_state else {
+                panic!("stream was replaced")
+            };
+            assert_eq!(state.status(), StreamStatus::Running);
+            assert_eq!(state.progress(), Some(0.25));
+            assert_eq!(state.plotter.title, offset.to_string());
+            assert_eq!(app.params.preparations, 1);
+        }
+        commands.send(()).unwrap();
+        published.recv_timeout(Duration::from_secs(2)).unwrap();
+        app.maintain_stream(&context);
+        app.update_display();
+        let Some(PlotState::Streaming(state)) = &app.plot_state else {
+            panic!("stream was replaced")
+        };
+        assert_eq!(state.progress(), Some(0.75));
+        assert_eq!(state.plotter.title, "-0.25");
+        commands.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            app.maintain_stream(&context);
+            let Some(PlotState::Streaming(state)) = &app.plot_state else {
+                panic!("stream was replaced")
+            };
+            if state.status() == StreamStatus::Finished {
+                break;
+            }
+            assert!(Instant::now() < deadline, "stream did not finish");
+            std::thread::yield_now();
+        }
+        app.params.offset = 0.5;
+        app.update_display();
+        let Some(PlotState::Streaming(state)) = &app.plot_state else {
+            panic!("stream was replaced")
+        };
+        assert_eq!(state.status(), StreamStatus::Finished);
+        assert_eq!(state.progress(), Some(1.0));
+        assert_eq!(state.plotter.title, "0.5");
+        assert_eq!(app.params.preparations, 1);
+    }
 }
