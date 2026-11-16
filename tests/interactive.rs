@@ -449,6 +449,126 @@ fn slider_app_renders_caches_switches_views_and_resets() {
 }
 
 #[test]
+fn converted_slider_recomputes_once_and_preserves_conversion_result() {
+    use eframe::App as _;
+
+    thread_local! {
+        static STORED_METRES: Cell<f64> = const { Cell::new(0.0) };
+        static COMPUTED_METRES: Cell<f64> = const { Cell::new(0.0) };
+    }
+
+    #[derive(Default)]
+    struct LengthParams {
+        metres: f64,
+    }
+
+    const METRES_PER_FOOT: f64 = 0.3048;
+
+    fn feet_to_metres(feet: f64) -> f64 {
+        feet * METRES_PER_FOOT
+    }
+
+    fn length_controls(params: &mut LengthParams) -> SliderGrid<'_> {
+        SliderGrid::new(
+            1,
+            [SliderGroup::new(
+                "Length",
+                [Slider::from_get_set("Length (ft)", 0.0..=2.0, |feet| {
+                    if let Some(feet) = feet {
+                        params.metres = feet_to_metres(feet);
+                    }
+                    STORED_METRES.set(params.metres);
+                    params.metres * (1.0 / METRES_PER_FOOT)
+                })],
+            )],
+        )
+    }
+
+    fn length_plot(params: &mut LengthParams) -> AppResult {
+        COMPUTATIONS.set(COMPUTATIONS.get() + 1);
+        COMPUTED_METRES.set(params.metres);
+        let mut plot = sample_plot();
+        plot.title(format!("Length: {} m", params.metres));
+        Ok(plot)
+    }
+
+    COMPUTATIONS.set(0);
+    const VIEWS: &[ViewOption<LengthParams>] =
+        &[ViewOption::new("Length", length_plot, length_controls)];
+    let ctx = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut draw = |time, events| ctx.run(input(time, events), |ctx| app.update(ctx, &mut frame));
+
+    draw(0.0, vec![]);
+    let output = draw(0.1, vec![]);
+    assert_eq!(COMPUTATIONS.get(), 1);
+
+    let slider_pos = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect)
+                if rect.rect.height() <= 8.0 && (50.0..=150.0).contains(&rect.rect.width()) =>
+            {
+                Some(rect.rect.center())
+            }
+            _ => None,
+        })
+        .expect("the length slider should be visible");
+    draw(
+        0.2,
+        vec![
+            egui::Event::PointerMoved(slider_pos),
+            pointer_button(slider_pos, true),
+        ],
+    );
+
+    let expected = feet_to_metres(1.0).to_bits();
+    assert_eq!(COMPUTATIONS.get(), 2);
+    assert_eq!(COMPUTED_METRES.get().to_bits(), expected);
+    assert_eq!(STORED_METRES.get().to_bits(), expected);
+
+    draw(0.3, vec![pointer_button(slider_pos, false)]);
+    for index in 0..5 {
+        draw(0.4 + f64::from(index) * 0.1, vec![]);
+        assert_eq!(COMPUTATIONS.get(), 2, "idle frames must not recompute");
+        assert_eq!(COMPUTED_METRES.get().to_bits(), expected);
+        assert_eq!(STORED_METRES.get().to_bits(), expected);
+    }
+}
+
+#[test]
+fn custom_slider_preserves_clamping_and_step_rounding() {
+    for (initial, step, expected) in [
+        (-1.0, None, 0.0_f64),
+        (3.0, None, 2.0),
+        (0.6, Some(0.25), 0.5),
+    ] {
+        let ctx = egui::Context::default();
+        let mut value = initial;
+        for index in 0..2 {
+            let _ = ctx.run(input(f64::from(index) * 0.1, vec![]), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut slider = Slider::from_get_set("Value", 0.0..=2.0, |next| {
+                        if let Some(next) = next {
+                            value = next;
+                        }
+                        value
+                    });
+                    if let Some(step) = step {
+                        slider = slider.step_by(step);
+                    }
+                    SliderGrid::new(1, [SliderGroup::new("Controls", [slider])]).show(ui);
+                });
+            });
+            assert_eq!(value.to_bits(), expected.to_bits());
+        }
+    }
+}
+
+#[test]
 fn dropped_data_survives_recomputation_is_isolated_by_view_and_resets() {
     use eframe::App as _;
 

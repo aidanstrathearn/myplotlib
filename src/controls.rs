@@ -22,11 +22,20 @@ impl<'a> Slider<'a> {
     pub fn from_get_set(
         label: impl Into<WidgetText>,
         range: RangeInclusive<f64>,
-        get_set_value: impl 'a + FnMut(Option<f64>) -> f64,
+        mut get_set_value: impl 'a + FnMut(Option<f64>) -> f64,
     ) -> Self {
         Self {
             label: label.into(),
-            widget: egui::Slider::from_get_set(range, get_set_value),
+            widget: egui::Slider::from_get_set(range, move |requested| {
+                if let Some(value) = requested {
+                    let current = get_set_value(None);
+                    // Avoid converting an unchanged value back into storage units.
+                    if value == current {
+                        return current;
+                    }
+                }
+                get_set_value(requested)
+            }),
         }
     }
 
