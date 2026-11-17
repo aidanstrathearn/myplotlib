@@ -89,8 +89,8 @@ impl<P> ViewOption<P> {
     /// Adds controls that change the presentation without recomputing the plot
     /// or stopping a running stream. `update` runs before each plot draw and
     /// should only update inexpensive display settings on the existing plotter.
-    /// Controls appear below the parameter controls, separated by a horizontal
-    /// rule, in their own horizontally scrolling row.
+    /// Controls appear below the parameter and streaming controls, separated by
+    /// a horizontal rule, in their own horizontally scrolling row.
     pub const fn display_controls(
         mut self,
         controls: ControlsAction<P>,
@@ -559,7 +559,7 @@ where
         ui.scope(|ui| {
             ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
-            let changed = egui::ScrollArea::horizontal()
+            egui::ScrollArea::horizontal()
                 .id_salt(("plot-app-controls", self.selected_view))
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
@@ -567,24 +567,31 @@ where
                     let grid = controls(&mut self.params);
                     grid.show(ui)
                 })
-                .inner;
-
-            if let Some((controls, _)) = self.selected_option().display_controls {
-                ui.separator();
-                egui::ScrollArea::horizontal()
-                    .id_salt(("plot-app-display-controls", self.selected_view))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.push_id("display-controls", |ui| {
-                            if controls(&mut self.params).show(ui) {
-                                ui.ctx().request_repaint();
-                            }
-                        });
-                    });
-            }
-            changed
+                .inner
         })
         .inner
+    }
+
+    fn draw_display_control_row(&mut self, ui: &mut Ui) {
+        let Some((controls, _)) = self.selected_option().display_controls else {
+            return;
+        };
+
+        ui.separator();
+        ui.scope(|ui| {
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+
+            egui::ScrollArea::horizontal()
+                .id_salt(("plot-app-display-controls", self.selected_view))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.push_id("display-controls", |ui| {
+                        if controls(&mut self.params).show(ui) {
+                            ui.ctx().request_repaint();
+                        }
+                    });
+                });
+        });
     }
 
     #[cfg(feature = "streaming")]
@@ -872,6 +879,8 @@ where
             ui.ctx().request_repaint();
         }
 
+        self.draw_display_control_row(ui);
+
         ui.separator();
 
         let plot_rect = self.draw_plot(ui);
@@ -1049,7 +1058,10 @@ mod tests {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| changed = app.draw_control_grid(ui));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    changed = app.draw_control_grid(ui);
+                    app.draw_display_control_row(ui);
+                });
             },
         );
         changed
