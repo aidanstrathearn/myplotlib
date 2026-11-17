@@ -89,6 +89,8 @@ impl<P> ViewOption<P> {
     /// Adds controls that change the presentation without recomputing the plot
     /// or stopping a running stream. `update` runs before each plot draw and
     /// should only update inexpensive display settings on the existing plotter.
+    /// Controls appear below the parameter controls, separated by a horizontal
+    /// rule, in their own horizontally scrolling row.
     pub const fn display_controls(
         mut self,
         controls: ControlsAction<P>,
@@ -557,24 +559,30 @@ where
         ui.scope(|ui| {
             ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
 
-            egui::ScrollArea::horizontal()
+            let changed = egui::ScrollArea::horizontal()
                 .id_salt(("plot-app-controls", self.selected_view))
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     let controls = self.selected_option().controls;
-                    let display_controls = self.selected_option().display_controls;
                     let grid = controls(&mut self.params);
-                    let changed = grid.show(ui);
-                    if let Some((controls, _)) = display_controls {
+                    grid.show(ui)
+                })
+                .inner;
+
+            if let Some((controls, _)) = self.selected_option().display_controls {
+                ui.separator();
+                egui::ScrollArea::horizontal()
+                    .id_salt(("plot-app-display-controls", self.selected_view))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
                         ui.push_id("display-controls", |ui| {
                             if controls(&mut self.params).show(ui) {
                                 ui.ctx().request_repaint();
                             }
                         });
-                    }
-                    changed
-                })
-                .inner
+                    });
+            }
+            changed
         })
         .inner
     }
@@ -1006,7 +1014,8 @@ mod tests {
                     Slider::new("Y offset", &mut params.offset, -1.0..=1.0).step_by(0.001),
                     Slider::new("Y scale", &mut params.scale, 0.0..=2.0).step_by(0.001),
                 ],
-            )],
+            )
+            .inline(true)],
         )
     }
 

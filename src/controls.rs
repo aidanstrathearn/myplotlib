@@ -61,6 +61,7 @@ impl<'a> Slider<'a> {
 pub struct SliderGroup<'a> {
     title: RichText,
     sliders: Vec<Slider<'a>>,
+    inline: bool,
 }
 
 impl<'a> SliderGroup<'a> {
@@ -68,7 +69,15 @@ impl<'a> SliderGroup<'a> {
         Self {
             title: title.into(),
             sliders: sliders.into_iter().collect(),
+            inline: false,
         }
+    }
+
+    /// Places the title beside the sliders instead of above them. Combine with
+    /// `SliderGrid::new(1, ...)` to keep the title and every slider on one row.
+    pub fn inline(mut self, inline: bool) -> Self {
+        self.inline = inline;
+        self
     }
 }
 
@@ -104,10 +113,20 @@ impl<'a> SliderGrid<'a> {
 
         egui::Grid::new(grid_id).show(ui, |ui| {
             for (group_index, group) in self.groups.into_iter().enumerate() {
-                ui.vertical(|ui| {
-                    ui.heading(group.title);
-                    changed |= show_sliders(ui, grid_id.with(group_index), max_rows, group.sliders);
-                });
+                let SliderGroup {
+                    title,
+                    sliders,
+                    inline,
+                } = group;
+                let show_group = |ui: &mut Ui| {
+                    ui.heading(title);
+                    changed |= show_sliders(ui, grid_id.with(group_index), max_rows, sliders);
+                };
+                if inline {
+                    ui.horizontal(show_group);
+                } else {
+                    ui.vertical(show_group);
+                }
             }
             ui.end_row();
         });
