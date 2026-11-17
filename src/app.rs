@@ -969,14 +969,28 @@ mod tests {
     use super::*;
     use crate::{Slider, SliderGroup};
 
-    #[derive(Default)]
     struct Params {
         offset: f64,
+        scale: f64,
         preparations: usize,
         #[cfg(feature = "streaming")]
         commands: Option<std::sync::mpsc::Receiver<()>>,
         #[cfg(feature = "streaming")]
         published: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl Default for Params {
+        fn default() -> Self {
+            Self {
+                offset: 0.0,
+                scale: 1.0,
+                preparations: 0,
+                #[cfg(feature = "streaming")]
+                commands: None,
+                #[cfg(feature = "streaming")]
+                published: None,
+            }
+        }
     }
 
     fn controls(_: &mut Params) -> SliderGrid<'_> {
@@ -988,14 +1002,18 @@ mod tests {
             1,
             [SliderGroup::new(
                 "Display",
-                [Slider::new("Y offset", &mut params.offset, -1.0..=1.0).step_by(0.001)],
+                [
+                    Slider::new("Y offset", &mut params.offset, -1.0..=1.0).step_by(0.001),
+                    Slider::new("Y scale", &mut params.scale, 0.0..=2.0).step_by(0.001),
+                ],
             )],
         )
     }
 
     fn update(params: &Params, plot: &mut Plotter) {
+        plot.y_gain(params.scale);
         plot.y_offset(params.offset);
-        plot.title(params.offset.to_string());
+        plot.title(format!("{},{}", params.offset, params.scale));
     }
 
     fn draw_controls(
@@ -1052,11 +1070,21 @@ mod tests {
             app.params.offset > 0.0,
             "the display slider must actually change"
         );
+        assert!(!draw_controls(&mut app, &context, Some(egui::Key::Tab)));
+        assert!(!draw_controls(
+            &mut app,
+            &context,
+            Some(egui::Key::ArrowRight)
+        ));
+        assert!(
+            app.params.scale > 1.0,
+            "the scale slider must actually change"
+        );
         app.update_display();
         assert_eq!(app.params.preparations, 1);
         assert_eq!(
             app.plot_state.as_ref().unwrap().plotter().unwrap().title,
-            app.params.offset.to_string()
+            format!("{},{}", app.params.offset, app.params.scale)
         );
     }
 
@@ -1093,15 +1121,16 @@ mod tests {
         let context = egui::Context::default();
         published.recv_timeout(Duration::from_secs(2)).unwrap();
         app.maintain_stream(&context);
-        for offset in [0.25, -0.25] {
+        for (offset, scale) in [(0.25, 0.5), (-0.25, 2.0)] {
             app.params.offset = offset;
+            app.params.scale = scale;
             app.update_display();
             let Some(PlotState::Streaming(state)) = &app.plot_state else {
                 panic!("stream was replaced")
             };
             assert_eq!(state.status(), StreamStatus::Running);
             assert_eq!(state.progress(), Some(0.25));
-            assert_eq!(state.plotter.title, offset.to_string());
+            assert_eq!(state.plotter.title, format!("{offset},{scale}"));
             assert_eq!(app.params.preparations, 1);
         }
         commands.send(()).unwrap();
@@ -1112,7 +1141,7 @@ mod tests {
             panic!("stream was replaced")
         };
         assert_eq!(state.progress(), Some(0.75));
-        assert_eq!(state.plotter.title, "-0.25");
+        assert_eq!(state.plotter.title, "-0.25,2");
         commands.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -1127,13 +1156,14 @@ mod tests {
             std::thread::yield_now();
         }
         app.params.offset = 0.5;
+        app.params.scale = 1.5;
         app.update_display();
         let Some(PlotState::Streaming(state)) = &app.plot_state else {
             panic!("stream was replaced")
         };
         assert_eq!(state.status(), StreamStatus::Finished);
         assert_eq!(state.progress(), Some(1.0));
-        assert_eq!(state.plotter.title, "0.5");
+        assert_eq!(state.plotter.title, "0.5,1.5");
         assert_eq!(app.params.preparations, 1);
     }
 }

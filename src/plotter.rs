@@ -128,13 +128,17 @@ fn transform_line(
     points: &Points,
     x_scale: AxisScale,
     y_scale: AxisScale,
+    y_gain: f64,
     y_offset: f64,
 ) -> Vec<Points> {
     if !x_scale.is_logarithmic() && !y_scale.is_logarithmic() {
-        return vec![if y_offset == 0.0 {
+        return vec![if y_gain == 1.0 && y_offset == 0.0 {
             points.clone()
         } else {
-            points.iter().map(|&[x, y]| [x, y + y_offset]).collect()
+            points
+                .iter()
+                .map(|&[x, y]| [x, y_gain * y + y_offset])
+                .collect()
         }];
     }
 
@@ -144,7 +148,7 @@ fn transform_line(
     for &[x, y] in points {
         let transformed = x_scale
             .forward(x)
-            .zip(y_scale.forward(y + y_offset))
+            .zip(y_scale.forward(y_gain * y + y_offset))
             .map(|(x, y)| [x, y])
             .filter(|[x, y]| x.is_finite() && y.is_finite());
 
@@ -166,6 +170,7 @@ fn transform_points(
     points: &Points,
     x_scale: AxisScale,
     y_scale: AxisScale,
+    y_gain: f64,
     y_offset: f64,
 ) -> Points {
     points
@@ -173,7 +178,7 @@ fn transform_points(
         .filter_map(|&[x, y]| {
             x_scale
                 .forward(x)
-                .zip(y_scale.forward(y + y_offset))
+                .zip(y_scale.forward(y_gain * y + y_offset))
                 .map(|(x, y)| [x, y])
                 .filter(|[x, y]| x.is_finite() && y.is_finite())
         })
@@ -538,6 +543,7 @@ pub struct Plotter {
     x_limits: Option<(f64, f64)>,
     x_limits_pending: std::cell::Cell<bool>,
     x_scale: AxisScale,
+    y_gain: f64,
     y_offset: f64,
 }
 
@@ -555,6 +561,7 @@ impl Default for Plotter {
             x_limits: None,
             x_limits_pending: std::cell::Cell::new(false),
             x_scale: AxisScale::Linear,
+            y_gain: 1.0,
             y_offset: 0.0,
         }
     }
@@ -585,10 +592,23 @@ impl Plotter {
     /// Shifts all data series vertically when rendered, without changing their
     /// stored points. Streamed replacements and appends use the same offset.
     /// Imported overlays, reference lines, and heatmaps keep their coordinates.
-    /// The offset must be finite and is applied before any logarithmic scaling.
+    /// The offset must be finite and is applied after [`Self::y_gain`] and before
+    /// any logarithmic scaling.
     pub fn y_offset(&mut self, offset: f64) {
         assert!(offset.is_finite(), "y offset must be finite");
         self.y_offset = offset;
+    }
+
+    /// Multiplies all data series vertically when rendered, without changing
+    /// their stored points. Streamed replacements and appends use the same gain.
+    /// Imported overlays, reference lines, and heatmaps keep their coordinates.
+    /// The gain must be finite and defaults to 1. It is applied before the y
+    /// offset and any logarithmic scaling: `displayed_y = gain * y + offset`.
+    /// This amplitude calibration is independent of [`Self::yscale`], which
+    /// selects a linear or logarithmic axis.
+    pub fn y_gain(&mut self, gain: f64) {
+        assert!(gain.is_finite(), "y gain must be finite");
+        self.y_gain = gain;
     }
 
     fn primary_y_axis(&self) -> &YAxis {
@@ -795,13 +815,18 @@ impl Plotter {
             .map(|series| {
                 self.y_axis(series.y_axis);
                 match series.style {
-                    SeriesStyle::Line => {
-                        transform_line(&series.points, self.x_scale, y_axis.scale, self.y_offset)
-                    }
+                    SeriesStyle::Line => transform_line(
+                        &series.points,
+                        self.x_scale,
+                        y_axis.scale,
+                        self.y_gain,
+                        self.y_offset,
+                    ),
                     SeriesStyle::Points => vec![transform_points(
                         &series.points,
                         self.x_scale,
                         y_axis.scale,
+                        self.y_gain,
                         self.y_offset,
                     )],
                 }
@@ -878,7 +903,7 @@ impl Plotter {
         for series in &self.series {
             self.y_axis(series.y_axis);
             for point in &series.points {
-                include(series.y_axis, point[1] + self.y_offset);
+                include(series.y_axis, self.y_gain * point[1] + self.y_offset);
             }
         }
         for line in &self.horizontal_lines {
@@ -922,8 +947,13 @@ impl Plotter {
                 let axis = self.y_axis(series.y_axis);
                 match series.style {
                     SeriesStyle::Line => {
-                        let mut segments =
-                            transform_line(&series.points, self.x_scale, axis.scale, self.y_offset);
+                        let mut segments = transform_line(
+                            &series.points,
+                            self.x_scale,
+                            axis.scale,
+                            self.y_gain,
+                            self.y_offset,
+                        );
                         for segment in &mut segments {
                             map_points(segment, series.y_axis);
                         }
@@ -934,6 +964,7 @@ impl Plotter {
                             &series.points,
                             self.x_scale,
                             axis.scale,
+                            self.y_gain,
                             self.y_offset,
                         );
                         map_points(&mut points, series.y_axis);
@@ -1098,6 +1129,7 @@ impl Plotter {
                 &series.points,
                 self.x_scale,
                 self.primary_y_axis().scale,
+                1.0,
                 0.0,
             );
             let markers = PlotMarkers::new(
@@ -1449,43 +1481,103 @@ mod tests {
     }
 
     #[test]
-    fn y_offset_applies_to_future_streamed_data_without_accumulating() {
+    fn y_gain_scales_curves_and_error_bands_before_adding_the_offset() {
+        let mut plot = Plotter::new();
+        let mean = plot.add_points(vec![[0.0, 0.25], [1.0, 0.75]]).id();
+        plot.add_points(vec![[0.0, 0.125], [1.0, 0.625]]);
+        plot.add_points(vec![[0.0, 0.375], [1.0, 0.875]])
+            .points_only();
+        plot.axhline(0.5);
+        plot.y_gain(2.0);
+        plot.y_offset(-0.25);
+
+        let rendered = plot.transform_for_rendering();
+        assert_eq!(
+            rendered.series_segments,
+            vec![
+                vec![vec![[0.0, 0.25], [1.0, 1.25]]],
+                vec![vec![[0.0, 0.0], [1.0, 1.0]]],
+                vec![vec![[0.0, 0.5], [1.0, 1.5]]],
+            ]
+        );
+        assert_eq!(rendered.horizontal_lines, vec![0.5]);
+        assert_eq!(plot.series[mean.0].points, vec![[0.0, 0.25], [1.0, 0.75]]);
+
+        plot.y_gain(0.0);
+        plot.y_offset(0.5);
+        assert!(
+            plot.transform_for_rendering()
+                .series_segments
+                .iter()
+                .all(|segments| segments == &vec![vec![[0.0, 0.5], [1.0, 0.5]]])
+        );
+    }
+
+    #[test]
+    fn y_calibration_applies_to_future_streamed_data_without_accumulating() {
         let mut plot = Plotter::new();
         let series = plot.add_points(Vec::new()).id();
+        plot.y_gain(2.0);
         plot.y_offset(0.25);
         plot.replace_points(series, vec![[0.0, 0.5]]);
         plot.append_points(series, [[1.0, 0.75]]);
         assert_eq!(
             plot.transform_for_rendering().series_segments[0],
-            vec![vec![[0.0, 0.75], [1.0, 1.0]]]
+            vec![vec![[0.0, 1.25], [1.0, 1.75]]]
         );
+        plot.y_gain(0.5);
         plot.y_offset(-0.25);
         plot.replace_points(series, vec![[2.0, 0.5]]);
         assert_eq!(
             plot.transform_for_rendering().series_segments[0],
-            vec![vec![[2.0, 0.25]]]
+            vec![vec![[2.0, 0.0]]]
         );
         assert_eq!(plot.series[series.0].points, vec![[2.0, 0.5]]);
     }
 
     #[test]
-    fn y_offset_precedes_log_scaling_and_twin_axis_domain_mapping() {
+    fn y_calibration_precedes_log_scaling_and_twin_axis_domain_mapping() {
         let mut plot = Plotter::new();
         plot.yscale(AxisScale::Log10);
-        plot.add_points(vec![[0.0, -9.0], [1.0, 0.0]]);
+        plot.add_points(vec![[0.0, -4.5], [1.0, 0.0]]);
+        plot.y_gain(2.0);
         plot.y_offset(10.0);
         assert_eq!(
             plot.transform_for_rendering().series_segments[0],
             vec![vec![[0.0, 0.0], [1.0, 1.0]]]
         );
         let right = plot.add_y_axis(YAxisSide::Right);
-        plot.add_points(vec![[0.0, 0.0], [1.0, 10.0]]).y_axis(right);
+        plot.add_points(vec![[0.0, 0.0], [1.0, 5.0]]).y_axis(right);
         let domains = plot.candidate_y_domains(&[]);
         assert_eq!(domains[0].range(), (0.0, 1.0));
         assert_eq!(domains[1].range(), (10.0, 20.0));
         assert_eq!(
             plot.transform_for_twin_axes(&domains).series_segments[1],
             vec![vec![[0.0, 0.0], [1.0, 1.0]]]
+        );
+    }
+
+    #[test]
+    fn y_calibration_keeps_imported_points_and_heatmap_bounds_in_their_original_units() {
+        let mut plot = Plotter::new();
+        plot.add_points(vec![[0.0, 1.0], [1.0, 2.0]]);
+        plot.y_gain(2.0);
+        plot.y_offset(10.0);
+        let imported = ImportedSeries {
+            id: 1,
+            label: "Experiment".to_owned(),
+            source_name: "experiment.csv".to_owned(),
+            points: vec![[0.0, 20.0], [1.0, 30.0]],
+        };
+
+        assert_eq!(
+            plot.candidate_y_domains(std::slice::from_ref(&imported))[0],
+            AxisDomain::new(12.0, 30.0, "test")
+        );
+        plot.heatmap(vec![1.0], 1, 1, [0.0, 1.0], [-3.0, -2.0]);
+        assert_eq!(
+            plot.candidate_y_domains(&[imported])[0],
+            AxisDomain::new(-3.0, 30.0, "test")
         );
     }
 
@@ -1761,7 +1853,7 @@ mod tests {
     #[test]
     fn nonpositive_log_values_split_lines() {
         let points = vec![[1.0, 10.0], [10.0, 0.0], [100.0, 1000.0]];
-        let segments = transform_line(&points, AxisScale::Log10, AxisScale::Log10, 0.0);
+        let segments = transform_line(&points, AxisScale::Log10, AxisScale::Log10, 1.0, 0.0);
 
         assert_eq!(segments, vec![vec![[0.0, 1.0]], vec![[2.0, 3.0]]]);
     }
