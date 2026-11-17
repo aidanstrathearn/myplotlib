@@ -11,6 +11,7 @@ pub(crate) struct ImportedSeries {
     pub(crate) label: String,
     pub(crate) source_name: String,
     pub(crate) points: Points,
+    pub(crate) y_uncertainties: Option<Vec<f64>>,
 }
 
 pub(crate) fn import_dropped_file(file: &egui::DroppedFile) -> Result<Vec<ImportedSeries>, String> {
@@ -76,8 +77,9 @@ fn parse_data(source_name: &str, mime: &str, bytes: &[u8]) -> Result<ImportedSer
         .trim(csv::Trim::All)
         .from_reader(bytes);
     let mut points = Vec::new();
+    let mut y_uncertainties = None;
     let mut label = default_label(source_name);
-    let mut first_record = true;
+    let mut columns = None;
     let mut had_header = false;
 
     for result in reader.records() {
@@ -86,36 +88,52 @@ fn parse_data(source_name: &str, mime: &str, bytes: &[u8]) -> Result<ImportedSer
             continue;
         }
         let line = record.position().map_or(1, csv::Position::line);
-        if record.len() != 2 {
-            return Err(format!(
-                "{source_name}: row {line} contains {} columns; expected exactly 2",
-                record.len()
-            ));
-        }
-
-        if first_record {
-            first_record = false;
-            let x = classify_number(&record[0]);
-            let y = classify_number(&record[1]);
-            if matches!((&x, &y), (NumberField::Text, NumberField::Text)) {
+        if let Some(expected) = columns {
+            if record.len() != expected {
+                return Err(format!(
+                    "{source_name}: row {line} contains {} columns; expected exactly {expected}",
+                    record.len()
+                ));
+            }
+        } else {
+            if !matches!(record.len(), 2 | 3) {
+                return Err(format!(
+                    "{source_name}: row {line} contains {} columns; expected 2 or 3",
+                    record.len()
+                ));
+            }
+            columns = Some(record.len());
+            y_uncertainties = (record.len() == 3).then(Vec::new);
+            if record
+                .iter()
+                .all(|field| matches!(classify_number(field), NumberField::Text))
+            {
                 had_header = true;
                 if !record[1].is_empty() && !record[1].eq_ignore_ascii_case("y") {
                     label = record[1].to_owned();
                 }
                 continue;
             }
-
-            points.push([
-                require_number(source_name, line, 1, &record[0], x)?,
-                require_number(source_name, line, 2, &record[1], y)?,
-            ]);
-            continue;
         }
 
-        points.push([
-            parse_number(source_name, line, 1, &record[0])?,
-            parse_number(source_name, line, 2, &record[1])?,
-        ]);
+        let x = parse_number(source_name, line, 1, &record[0])?;
+        let y = parse_number(source_name, line, 2, &record[1])?;
+        if let Some(uncertainties) = &mut y_uncertainties {
+            let uncertainty = parse_number(source_name, line, 3, &record[2])?;
+            if uncertainty < 0.0 {
+                return Err(format!(
+                    "{source_name}: row {line}, column 3 must be a nonnegative uncertainty: {:?}",
+                    &record[2]
+                ));
+            }
+            if !(y - uncertainty).is_finite() || !(y + uncertainty).is_finite() {
+                return Err(format!(
+                    "{source_name}: row {line}, column 3 produces non-finite error bar endpoints"
+                ));
+            }
+            uncertainties.push(uncertainty);
+        }
+        points.push([x, y]);
         if points.len() > MAX_DATA_ROWS {
             return Err(format!(
                 "{source_name}: the file contains more than the {MAX_DATA_ROWS} row import limit"
@@ -123,7 +141,7 @@ fn parse_data(source_name: &str, mime: &str, bytes: &[u8]) -> Result<ImportedSer
         }
     }
 
-    if first_record {
+    if columns.is_none() {
         return Err(format!("{source_name}: the file contains no data"));
     }
     if points.is_empty() {
@@ -138,6 +156,7 @@ fn parse_data(source_name: &str, mime: &str, bytes: &[u8]) -> Result<ImportedSer
         label,
         source_name: source_name.to_owned(),
         points,
+        y_uncertainties,
     })
 }
 
@@ -233,6 +252,7 @@ mod tests {
         assert_eq!(series.label, "measurements");
         assert_eq!(series.source_name, "measurements.csv");
         assert_eq!(series.points, vec![[0.0, 1.0], [2.5, 3.5]]);
+        assert_eq!(series.y_uncertainties, None);
     }
 
     #[test]
@@ -246,6 +266,91 @@ mod tests {
 
         assert_eq!(series.label, "voltage");
         assert_eq!(series.points, vec![[0.0, 1.0], [2.0, 3.0]]);
+        assert_eq!(series.y_uncertainties, None);
+    }
+
+    #[test]
+    fn parses_rabi_headers_and_scientific_notation_with_uncertainties() {
+        let series = parse_data(
+            "rabi_data_raw.csv",
+            "text/csv",
+            b"yellow_pulse_time,ratio,u_ratio\n0,0.9724572703,0.002945120449\n5e-05,0.9533036853,0.002885116733\n",
+        )
+        .unwrap();
+
+        assert_eq!(series.label, "ratio");
+        assert_eq!(
+            series.points,
+            vec![[0.0, 0.9724572703], [5e-5, 0.9533036853]]
+        );
+        assert_eq!(
+            series.y_uncertainties,
+            Some(vec![0.002945120449, 0.002885116733])
+        );
+    }
+
+    #[test]
+    fn parses_headerless_uncertainties_including_zero() {
+        let series = parse_data("values.csv", "", b"0,1,0\n2,3,4e-2\n").unwrap();
+
+        assert_eq!(series.label, "values");
+        assert_eq!(series.points, vec![[0.0, 1.0], [2.0, 3.0]]);
+        assert_eq!(series.y_uncertainties, Some(vec![0.0, 0.04]));
+    }
+
+    #[test]
+    fn parses_uncertainties_with_quoted_tsv_headers_and_a_bom() {
+        let series = parse_data(
+            "values.tsv",
+            "text/tab-separated-values",
+            b"\xef\xbb\xbf\"time\"\t\"ratio\"\t\"u_ratio\"\n0\t1\t0.1\n",
+        )
+        .unwrap();
+
+        assert_eq!(series.label, "ratio");
+        assert_eq!(series.y_uncertainties, Some(vec![0.1]));
+    }
+
+    #[test]
+    fn rejects_invalid_uncertainties_with_their_row_and_column() {
+        for (value, message) in [
+            ("-0.1", "must be a nonnegative uncertainty"),
+            ("NaN", "is not finite"),
+            ("inf", "is not finite"),
+            ("nope", "is not a number"),
+            ("", "is not a number"),
+        ] {
+            let csv = format!("x,y,u_y\n0,1,{value}\n");
+            let error = parse_data("bad.csv", "text/csv", csv.as_bytes()).unwrap_err();
+            assert!(error.contains("row 2, column 3"), "{error}");
+            assert!(error.contains(message), "{error}");
+        }
+
+        let error = parse_data("bad.csv", "", b"0,1e308,1e308\n").unwrap_err();
+        assert!(
+            error.contains("row 1, column 3 produces non-finite"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn requires_two_or_three_consistent_columns_and_complete_headers() {
+        for csv in [b"1\n".as_slice(), b"1,2,3,4\n"] {
+            let error = parse_data("bad.csv", "", csv).unwrap_err();
+            assert!(error.contains("expected 2 or 3"), "{error}");
+        }
+        for csv in [b"x,y,u_y\n0,1\n".as_slice(), b"0,1,0.1\n2,3\n"] {
+            let error = parse_data("bad.csv", "", csv).unwrap_err();
+            assert!(
+                error.contains("row 2 contains 2 columns; expected exactly 3"),
+                "{error}"
+            );
+        }
+        let error = parse_data("bad.csv", "", b"time,ratio,0.1\n").unwrap_err();
+        assert!(error.contains("row 1, column 1 is not a number"), "{error}");
+
+        let error = parse_data("bad.csv", "", b"x,y,u_y\n").unwrap_err();
+        assert!(error.contains("no data rows after its header"), "{error}");
     }
 
     #[test]
@@ -265,13 +370,14 @@ mod tests {
         let file = egui::DroppedFile {
             name: "web.csv".to_owned(),
             mime: "text/csv".to_owned(),
-            bytes: Some(Arc::from(&b"x,y\n0,1\n"[..])),
+            bytes: Some(Arc::from(&b"x,y,u_y\n0,1,0.1\n"[..])),
             ..Default::default()
         };
 
         let imported = import_dropped_file(&file).unwrap();
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].points, vec![[0.0, 1.0]]);
+        assert_eq!(imported[0].y_uncertainties, Some(vec![0.1]));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -286,7 +392,7 @@ mod tests {
             std::process::id(),
             unique
         ));
-        std::fs::write(&path, b"x,y\n0,1\n").unwrap();
+        std::fs::write(&path, b"x,y,u_y\n0,1,0.1\n").unwrap();
         let file = egui::DroppedFile {
             path: Some(path.clone()),
             ..Default::default()
@@ -295,6 +401,8 @@ mod tests {
         let result = import_dropped_file(&file);
         std::fs::remove_file(path).unwrap();
 
-        assert_eq!(result.unwrap()[0].points, vec![[0.0, 1.0]]);
+        let imported = result.unwrap();
+        assert_eq!(imported[0].points, vec![[0.0, 1.0]]);
+        assert_eq!(imported[0].y_uncertainties, Some(vec![0.1]));
     }
 }

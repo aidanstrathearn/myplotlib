@@ -627,6 +627,125 @@ fn dropped_data_survives_recomputation_is_isolated_by_view_and_resets() {
 }
 
 #[test]
+fn dropped_uncertainties_render_hover_and_toggle_as_one_series() {
+    use eframe::App as _;
+
+    const VIEWS: &[ViewOption<Params>] = &[ViewOption::new("Signal", success, controls)];
+    let ctx = egui::Context::default();
+    let creation = eframe::CreationContext::_new_kittest(ctx.clone());
+    let mut app = App::new(&creation, AppDefinition::new("Test", VIEWS));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut draw = |input| ctx.run(input, |ctx| app.update(ctx, &mut frame));
+    draw(input(0.0, vec![]));
+
+    let mut dropped = input(0.1, vec![]);
+    dropped.dropped_files.push(egui::DroppedFile {
+        name: "uncertainties.csv".to_owned(),
+        mime: "text/csv".to_owned(),
+        bytes: Some(Arc::from(
+            &b"time,observed,u_y\n0,0,0.2\n5,1,0.4\n10,0,0\n"[..],
+        )),
+        ..Default::default()
+    });
+    draw(dropped);
+    let output = draw(input(0.2, vec![]));
+    assert!(contains_text(&output, "uncertainties.csv  ×"));
+
+    let colour = egui::Color32::from_rgb(255, 127, 14);
+    let bars = |output: &egui::FullOutput| {
+        output
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(
+                    shape.shape,
+                    egui::Shape::LineSegment { stroke, .. }
+                        if stroke.color == colour && stroke.width == 1.5
+                )
+            })
+            .count()
+    };
+    let markers = |output: &egui::FullOutput| {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle) if circle.fill == colour && circle.radius == 4.0 => {
+                    Some(circle.center)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bars(&output), 9);
+    let centers = markers(&output);
+    assert_eq!(centers.len(), 3);
+    let legend_labels = output
+        .shapes
+        .iter()
+        .filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "observed" => Some(text.pos),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(legend_labels.len(), 1);
+    let legend_position = legend_labels[0] + egui::vec2(4.0, 4.0);
+
+    // Hover the stem away from the model's coincident point.
+    draw(input(
+        0.3,
+        vec![egui::Event::PointerMoved(
+            centers[1] + egui::vec2(0.0, -15.0),
+        )],
+    ));
+    let output = draw(input(0.4, vec![]));
+    assert!(
+        contains_text(&output, "observed\nx = 5\ny = 1 ± 0.4"),
+        "hover at {:?}: {:?}",
+        centers[1],
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(&text.galley.job.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    draw(input(
+        0.5,
+        vec![
+            egui::Event::PointerMoved(legend_position),
+            pointer_button(legend_position, true),
+        ],
+    ));
+    draw(input(0.6, vec![pointer_button(legend_position, false)]));
+    let output = draw(input(
+        0.7,
+        vec![egui::Event::PointerMoved(egui::pos2(20.0, 20.0))],
+    ));
+    assert_eq!(bars(&output), 0);
+    assert!(markers(&output).is_empty());
+
+    draw(input(
+        0.8,
+        vec![
+            egui::Event::PointerMoved(legend_position),
+            pointer_button(legend_position, true),
+        ],
+    ));
+    draw(input(0.9, vec![pointer_button(legend_position, false)]));
+    draw(input(
+        1.0,
+        vec![egui::Event::PointerMoved(egui::pos2(20.0, 20.0))],
+    ));
+    let output = draw(input(1.1, vec![]));
+    assert_eq!(bars(&output), 9);
+    assert_eq!(markers(&output).len(), 3);
+}
+
+#[test]
 fn app_save_button_requests_a_screenshot() {
     use eframe::App as _;
 
