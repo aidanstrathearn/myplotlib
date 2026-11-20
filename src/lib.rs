@@ -21,7 +21,7 @@ pub use app::{StreamAction, StreamPlanResult};
 pub use appmenu::AppMenu;
 pub use controls::{Slider, SliderGrid, SliderGroup};
 pub use figure::Figure;
-pub use heatmap::Heatmap;
+pub use heatmap::{Heatmap, HeatmapUpdateError};
 pub use plotter::{
     AxisScale, PlotLine, Plotter, ReferenceLine, SeriesId, SummaryItem, YAxis, YAxisId, YAxisSide,
 };

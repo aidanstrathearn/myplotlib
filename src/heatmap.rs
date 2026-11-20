@@ -1,5 +1,26 @@
 use eframe::egui;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::fmt;
+
+/// An invalid update to an existing heatmap. The grid is left unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeatmapUpdateError {
+    MissingHeatmap,
+    IncompleteRows,
+    RowRangeOutOfBounds,
+}
+
+impl fmt::Display for HeatmapUpdateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::MissingHeatmap => "plotter has no heatmap",
+            Self::IncompleteRows => "heatmap row updates require complete rows",
+            Self::RowRangeOutOfBounds => "heatmap row update is out of bounds",
+        })
+    }
+}
+
+impl std::error::Error for HeatmapUpdateError {}
 
 /// A uniformly spaced scalar grid. Row zero is the bottom row; bounds are
 /// the outer cell edges. Nonfinite values are transparent.
@@ -15,6 +36,7 @@ pub struct Heatmap {
     label: String,
     // Keep the handle alive, scoped to the egui context that owns the texture.
     texture: RefCell<Option<(egui::Context, egui::TextureHandle)>>,
+    texture_dirty: Cell<bool>,
 }
 
 impl Heatmap {
@@ -69,7 +91,34 @@ impl Heatmap {
             limits,
             label: String::new(),
             texture: RefCell::new(None),
+            texture_dirty: Cell::new(false),
         }
+    }
+
+    /// Replaces consecutive complete rows, starting at `first_row` (bottom = 0).
+    /// Values are row-major. Bounds, colour limits, label, and other rows are
+    /// preserved. Use NaN to clear cells back to transparent.
+    ///
+    /// Returns an error without changing the grid if values do not contain
+    /// complete rows or the row range is out of bounds. Empty updates are a
+    /// no-op when `first_row <= rows`.
+    pub fn set_rows(&mut self, first_row: usize, values: &[f64]) -> Result<(), HeatmapUpdateError> {
+        if !values.len().is_multiple_of(self.columns) {
+            return Err(HeatmapUpdateError::IncompleteRows);
+        }
+        let row_count = values.len() / self.columns;
+        if first_row
+            .checked_add(row_count)
+            .is_none_or(|end| end > self.rows)
+        {
+            return Err(HeatmapUpdateError::RowRangeOutOfBounds);
+        }
+        if !values.is_empty() {
+            let start = first_row * self.columns;
+            self.values[start..start + values.len()].copy_from_slice(values);
+            self.texture_dirty.set(true);
+        }
+        Ok(())
     }
 
     /// Sets fixed colour limits. Values outside them use the endpoint colours.
@@ -79,7 +128,7 @@ impl Heatmap {
             "heatmap colour limits must be finite and increasing"
         );
         self.limits = (lower, upper);
-        *self.texture.get_mut() = None;
+        self.texture_dirty.set(true);
         self
     }
 
@@ -123,7 +172,14 @@ impl Heatmap {
                 ctx.clone(),
                 ctx.load_texture("heatmap", self.image(), egui::TextureOptions::NEAREST),
             ));
+        } else if self.texture_dirty.get() {
+            cached
+                .as_mut()
+                .unwrap()
+                .1
+                .set(self.image(), egui::TextureOptions::NEAREST);
         }
+        self.texture_dirty.set(false);
         cached.as_ref().unwrap().1.id()
     }
 
@@ -208,6 +264,87 @@ fn palette(t: f64) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_updates_preserve_other_cells_and_configuration() {
+        let mut h = Heatmap::new(vec![f64::NAN; 8], 4, 2, [-1.0, 1.0], [0.0, 4.0]);
+        h.color_limits(-2.0, 2.0).label("Probability");
+        h.set_rows(1, &[0.0, 0.5, 1.0, 1.5]).unwrap();
+        h.set_rows(2, &[f64::NAN, 2.0]).unwrap();
+
+        assert!(h.values[..2].iter().all(|v| v.is_nan()));
+        assert_eq!(&h.values[2..4], &[0.0, 0.5]);
+        assert!(h.cell(-0.5, 2.5).unwrap().2.is_nan());
+        assert_eq!(h.cell(0.5, 2.5), Some((2, 1, 2.0)));
+        assert!(h.values[6..].iter().all(|v| v.is_nan()));
+        assert_eq!(h.x_bounds, [-1.0, 1.0]);
+        assert_eq!(h.y_bounds, [0.0, 4.0]);
+        assert_eq!(h.limits, (-2.0, 2.0));
+        assert_eq!(h.label, "Probability");
+        assert_eq!(h.image().pixels[2], egui::Color32::TRANSPARENT);
+        assert_eq!(h.image().pixels[3], palette(1.0));
+    }
+
+    #[test]
+    fn invalid_row_updates_leave_data_unchanged() {
+        let mut h = Heatmap::new(vec![0.0; 4], 2, 2, [0.0, 2.0], [0.0, 2.0]);
+        assert_eq!(
+            h.set_rows(0, &[1.0]),
+            Err(HeatmapUpdateError::IncompleteRows)
+        );
+        for (first_row, values) in [
+            (1, &[1.0; 4][..]),
+            (2, &[1.0; 2][..]),
+            (3, &[][..]),
+            (usize::MAX, &[1.0; 2][..]),
+        ] {
+            assert_eq!(
+                h.set_rows(first_row, values),
+                Err(HeatmapUpdateError::RowRangeOutOfBounds)
+            );
+        }
+        h.set_rows(2, &[]).unwrap();
+        assert_eq!(h.values, vec![0.0; 4]);
+        assert!(!h.texture_dirty.get());
+    }
+
+    #[test]
+    fn row_batches_refresh_the_cached_texture_once_on_demand() {
+        let ctx = egui::Context::default();
+        let mut h = Heatmap::new(vec![f64::NAN; 4], 2, 2, [0.0, 2.0], [0.0, 2.0]);
+        h.color_limits(0.0, 1.0);
+        let texture = h.texture(&ctx);
+        let _ = ctx.tex_manager().write().take_delta();
+
+        h.set_rows(0, &[0.0, 0.25]).unwrap();
+        h.set_rows(1, &[0.75, 1.0]).unwrap();
+        assert!(ctx.tex_manager().write().take_delta().set.is_empty());
+        assert_eq!(h.texture(&ctx), texture);
+        let delta = ctx.tex_manager().write().take_delta();
+        assert_eq!(delta.set.len(), 1);
+        assert_eq!(delta.set[0].0, texture);
+        let egui::ImageData::Color(image) = &delta.set[0].1.image;
+        assert_eq!(
+            image.pixels,
+            vec![palette(0.75), palette(1.0), palette(0.0), palette(0.25)]
+        );
+        assert_eq!(h.texture(&ctx), texture);
+        assert!(ctx.tex_manager().write().take_delta().set.is_empty());
+
+        h.color_limits(0.0, 2.0);
+        assert_eq!(h.texture(&ctx), texture);
+        let delta = ctx.tex_manager().write().take_delta();
+        assert_eq!(delta.set.len(), 1);
+        let egui::ImageData::Color(image) = &delta.set[0].1.image;
+        assert_eq!(image.pixels[1], palette(0.5));
+
+        // A new UI context needs its own texture even when no data is dirty.
+        let other_ctx = egui::Context::default();
+        let other_texture = h.texture(&other_ctx);
+        let delta = other_ctx.tex_manager().write().take_delta();
+        assert!(delta.set.iter().any(|(id, _)| *id == other_texture));
+    }
+
     #[test]
     fn orientation_lookup_and_missing_values() {
         let h = Heatmap::new(vec![0.0, 1.0, 2.0, f64::NAN], 2, 2, [0.0, 2.0], [0.0, 2.0]);

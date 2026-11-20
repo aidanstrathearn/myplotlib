@@ -8,6 +8,10 @@ publish = false
 default = []
 streaming = ["dep:rayon", "dep:wasm-bindgen-rayon"]
 
+[[example]]
+name = "streaming_heatmap"
+required-features = ["streaming"]
+
 [dependencies]
 csv = "1.4.0"
 egui_plot = "0.34.1"

@@ -161,6 +161,20 @@ impl Plotter {
         self.heatmap.as_mut().unwrap()
     }
 
+    /// Replaces complete rows of the existing heatmap, with row zero at the bottom.
+    /// Preserves bounds, colour limits, labels, and pan/zoom state. Returns an
+    /// error if no heatmap exists or the update is invalid; see [`crate::Heatmap::set_rows`].
+    pub fn set_heatmap_rows(
+        &mut self,
+        first_row: usize,
+        values: &[f64],
+    ) -> std::result::Result<(), crate::HeatmapUpdateError> {
+        self.heatmap
+            .as_mut()
+            .ok_or(crate::HeatmapUpdateError::MissingHeatmap)?
+            .set_rows(first_row, values)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

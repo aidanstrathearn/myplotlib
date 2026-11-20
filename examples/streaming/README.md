@@ -20,6 +20,21 @@ Run it natively from the repository root:
 cargo run --manifest-path examples/streaming/Cargo.toml
 ```
 
+For a progressively filled heatmap, run the standalone example:
+
+```sh
+cargo run --features streaming --example streaming_heatmap
+```
+
+Create the heatmap at its final dimensions and bounds, using `f64::NAN` for
+uncomputed cells and fixed colour limits. The worker can then send consecutive
+complete rows with `stream.set_heatmap_rows(first_row, values)?`, where `values`
+is a row-major `Vec<f64>` and row zero is at the bottom. Each update preserves
+the other rows, axes, colour limits, and label. Updates use the existing bounded,
+cancellation-aware queue; the UI uploads the changed grid once when rendered.
+Invalid row ranges, incomplete rows, or updates without a heatmap fail the
+stream while preserving the previously applied data.
+
 By default, selecting a streaming view prepares its initial plot without
 starting the calculation. Adjusting its controls rebuilds that initial plot, so
 the Gaussian and Lorentzian inputs and the fit's initial guess can be inspected

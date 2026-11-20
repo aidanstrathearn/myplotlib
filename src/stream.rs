@@ -159,6 +159,19 @@ impl<P: 'static> StreamContext<P> {
         self.send(StreamUpdate::Clear(series))
     }
 
+    /// Queues replacement of consecutive complete rows in the existing heatmap.
+    ///
+    /// Values are row-major, with row zero at the bottom. Send only newly
+    /// calculated rows in batches; bounds, colour limits, and labels stay fixed.
+    /// Initialize uncomputed cells with NaN to leave them transparent.
+    ///
+    /// This returns after queueing, before validation on the UI thread. A missing
+    /// heatmap, incomplete rows, or an out-of-bounds range fails the stream and
+    /// leaves the previously applied data available for inspection.
+    pub fn set_heatmap_rows(&self, first_row: usize, values: Vec<f64>) -> StreamResult {
+        self.send(StreamUpdate::HeatmapRows(first_row, values))
+    }
+
     /// Updates a labeled plot summary on the UI thread, or adds it if absent.
     /// Uses the same bounded, cancellation-aware queue as point updates.
     pub fn set_summary(&self, label: impl Into<String>, value: impl Display) -> StreamResult {
@@ -213,6 +226,7 @@ enum StreamUpdate<P> {
     Append(SeriesId, Points),
     Replace(SeriesId, Points),
     Clear(SeriesId),
+    HeatmapRows(usize, Vec<f64>),
     Progress(f32),
     Summary(String, String),
     UpdateParams(ParamUpdate<P>),
@@ -348,6 +362,21 @@ impl<P: 'static> StreamState<P> {
                 }
                 StreamUpdate::Clear(series) => {
                     self.plotter.clear_points(series);
+                }
+                StreamUpdate::HeatmapRows(first_row, values) => {
+                    if let Err(error) = self.plotter.set_heatmap_rows(first_row, &values) {
+                        if let Some(cancel) = &self.cancel {
+                            cancel.cancel();
+                        }
+                        self.elapsed = self
+                            .started
+                            .as_ref()
+                            .map_or(Duration::ZERO, |time| time.elapsed());
+                        self.status = StreamStatus::Failed;
+                        self.error = Some(error.to_string());
+                        finished = true;
+                        break;
+                    }
                 }
                 StreamUpdate::Progress(progress) => self.progress = Some(progress),
                 StreamUpdate::Summary(label, value) => {
@@ -645,6 +674,168 @@ mod tests {
 
         assert_eq!(state.status(), StreamStatus::Finished);
         assert_eq!(state.progress(), Some(1.0));
+    }
+
+    #[test]
+    fn heatmap_batches_are_applied_on_the_ui_thread_and_rendered_together() {
+        use eframe::egui;
+
+        let mut plot = Plotter::new();
+        plot.heatmap(vec![f64::NAN; 6], 3, 2, [0.0, 2.0], [0.0, 3.0])
+            .color_limits(0.0, 1.0);
+        let ctx = egui::Context::default();
+        let draw = |plot: &Plotter| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| plot.show_ui(ui, "heatmap"));
+                },
+            )
+        };
+        let initial = draw(&plot);
+        let texture = initial
+            .textures_delta
+            .set
+            .iter()
+            .find(|(_, delta)| delta.image.size() == [2, 3])
+            .unwrap()
+            .0;
+
+        let (published_sender, published_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let plan = StreamPlan::new(plot, move |stream| {
+            stream.set_heatmap_rows(1, vec![0.0, 0.25, 0.75, 1.0])?;
+            stream.set_heatmap_rows(2, vec![f64::NAN, 0.5])?;
+            stream.set_progress(0.75)?;
+            published_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+            Ok(())
+        });
+        let mut state = start(plan);
+        published_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        // Queueing on the worker does not mutate or upload the UI's heatmap.
+        assert!(
+            !draw(&state.plotter)
+                .textures_delta
+                .set
+                .iter()
+                .any(|(id, _)| *id == texture)
+        );
+        state.drain(&mut ());
+        assert_eq!(state.progress(), Some(0.75));
+        let updated = draw(&state.plotter);
+        let deltas: Vec<_> = updated
+            .textures_delta
+            .set
+            .iter()
+            .filter(|(id, _)| *id == texture)
+            .collect();
+        assert_eq!(deltas.len(), 1);
+        let egui::ImageData::Color(actual) = &deltas[0].1.image;
+
+        let mut expected = crate::Heatmap::new(
+            vec![f64::NAN, f64::NAN, 0.0, 0.25, f64::NAN, 0.5],
+            3,
+            2,
+            [0.0, 2.0],
+            [0.0, 3.0],
+        );
+        expected.color_limits(0.0, 1.0);
+        let expected_ctx = egui::Context::default();
+        let expected_texture = expected.texture(&expected_ctx);
+        let expected_delta = expected_ctx.tex_manager().write().take_delta();
+        let (_, delta) = expected_delta
+            .set
+            .iter()
+            .find(|(id, _)| *id == expected_texture)
+            .unwrap();
+        let egui::ImageData::Color(expected_image) = &delta.image;
+        assert_eq!(actual.pixels, expected_image.pixels);
+
+        release_sender.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            state.drain(&mut ());
+            if state.status() == StreamStatus::Finished {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(state.status(), StreamStatus::Finished);
+    }
+
+    #[test]
+    fn invalid_heatmap_updates_fail_the_stream_without_later_updates_overwriting_failure() {
+        use crate::HeatmapUpdateError;
+
+        for (has_heatmap, first_row, values, expected_error) in [
+            (false, 0, vec![1.0, 1.0], HeatmapUpdateError::MissingHeatmap),
+            (true, 0, vec![1.0], HeatmapUpdateError::IncompleteRows),
+            (
+                true,
+                2,
+                vec![1.0, 1.0],
+                HeatmapUpdateError::RowRangeOutOfBounds,
+            ),
+        ] {
+            let mut plot = Plotter::new();
+            if has_heatmap {
+                plot.heatmap(vec![f64::NAN; 4], 2, 2, [0.0, 2.0], [0.0, 2.0]);
+            }
+            let (published_sender, published_receiver) = mpsc::channel();
+            let plan = StreamPlan::new(plot, move |stream| {
+                stream.set_progress(0.25)?;
+                stream.set_heatmap_rows(first_row, values)?;
+                stream.set_progress(0.75)?;
+                published_sender.send(()).unwrap();
+                Ok(())
+            });
+            let mut state = start(plan);
+            published_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+            state.drain(&mut ());
+            state.drain(&mut ());
+
+            assert_eq!(state.status(), StreamStatus::Failed);
+            assert_eq!(state.error(), Some(expected_error.to_string().as_str()));
+            assert_eq!(state.progress(), Some(0.25));
+            assert!(!state.needs_repaint_poll());
+        }
+    }
+
+    #[test]
+    fn heatmap_publishing_observes_cancellation() {
+        let mut plot = Plotter::new();
+        plot.heatmap(vec![f64::NAN; 4], 2, 2, [0.0, 2.0], [0.0, 2.0]);
+        let (release_sender, release_receiver) = mpsc::channel();
+        let plan = StreamPlan::new(plot, move |stream| {
+            release_receiver.recv().unwrap();
+            stream.set_heatmap_rows(0, vec![0.0, 1.0])
+        });
+        let mut state = start(plan);
+        state.stop();
+        release_sender.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            state.drain(&mut ());
+            if state.status() == StreamStatus::Stopped {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(state.status(), StreamStatus::Stopped);
+        assert_eq!(state.error(), None);
     }
 
     #[test]
